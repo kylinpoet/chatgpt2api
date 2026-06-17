@@ -9,7 +9,7 @@ import zipfile
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -24,6 +24,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
+from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
 from services.sub2api_service import (
@@ -48,10 +49,17 @@ class UserKeyUpdateRequest(BaseModel):
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     accounts: list[dict[str, Any]] = Field(default_factory=list)
+    refresh: bool = True
+    return_items: bool = True
 
 
 class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+
+
+class AccountImportCleanupRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+    remove: bool = False
 
 
 class AccountRefreshRequest(BaseModel):
@@ -66,9 +74,30 @@ class AccountExportRequest(BaseModel):
 class AccountUpdateRequest(BaseModel):
     access_token: str = ""
     type: str | None = None
+    source_type: str | None = None
     status: str | None = None
     quota: int | None = None
     proxy: str | None = None
+    group_id: str | None = None
+
+
+class AccountBatchUpdateRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+    status: str | None = None
+
+
+class AccountGroupBindRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
+    group_id: str = ""
+
+
+class AccountGroupRequest(BaseModel):
+    id: str = ""
+    name: str = ""
+    proxy_group_id: str = ""
+    enabled: bool = True
+    notes: str = ""
+    create_only: bool = False
 
 
 class CPAPoolCreateRequest(BaseModel):
@@ -135,6 +164,166 @@ def _download_timestamp() -> str:
 def _safe_export_name(value: str, fallback: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
     return (clean or fallback)[:80]
+
+
+def _clean_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _slug_id(value: object) -> str:
+    raw = _clean_text(value).lower()
+    chars: list[str] = []
+    for char in raw:
+        if char.isalnum() or char in {"-", "_"}:
+            chars.append(char)
+        elif char.isspace():
+            chars.append("-")
+    return "".join(chars).strip("-_")
+
+
+def _config_dict_list(key: str) -> list[dict[str, Any]]:
+    raw = config.get().get(key)
+    if not isinstance(raw, list):
+        return []
+    return [dict(item) for item in raw if isinstance(item, dict)]
+
+
+def _account_group_id(value: object) -> str:
+    return _slug_id(value)
+
+
+def _account_group_payload(groups: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    accounts = account_service.list_accounts()
+    counts: dict[str, int] = {}
+    for account in accounts:
+        group_id = _clean_text(account.get("group_id"))
+        if group_id:
+            counts[group_id] = counts.get(group_id, 0) + 1
+    normalized_groups = []
+    for group in groups if groups is not None else _config_dict_list("account_groups"):
+        group_id = _account_group_id(group.get("id"))
+        if not group_id:
+            continue
+        normalized_groups.append(
+            {
+                "id": group_id,
+                "name": _clean_text(group.get("name")) or group_id,
+                "proxy_group_id": _clean_text(group.get("proxy_group_id")),
+                "enabled": bool(group.get("enabled", True)),
+                "notes": _clean_text(group.get("notes")),
+                "account_count": counts.get(group_id, 0),
+            }
+        )
+    return {
+        "groups": normalized_groups,
+        "proxy_groups": _config_dict_list("proxy_groups"),
+    }
+
+
+def _upsert_account_group(body: AccountGroupRequest) -> dict[str, Any]:
+    group_id = _account_group_id(body.id or body.name)
+    if not group_id:
+        raise ValueError("account group id is required")
+    groups = _config_dict_list("account_groups")
+    exists = any(_account_group_id(group.get("id")) == group_id for group in groups)
+    if body.create_only and exists:
+        raise ValueError("account group already exists")
+    item = {
+        "id": group_id,
+        "name": body.name.strip() or group_id,
+        "proxy_group_id": body.proxy_group_id.strip(),
+        "enabled": body.enabled,
+        "notes": body.notes.strip(),
+    }
+    next_groups = [group for group in groups if _account_group_id(group.get("id")) != group_id]
+    next_groups.append(item)
+    updated = config.update({"account_groups": next_groups})
+    return {"group": item, **_account_group_payload(updated.get("account_groups", []))}
+
+
+def _status_matches_filter(account: dict[str, Any], status_filter: str) -> bool:
+    status_filter = status_filter.strip().lower()
+    if not status_filter or status_filter == "all":
+        return True
+    status = _clean_text(account.get("status"))
+    status_map = {
+        "normal": "\u6b63\u5e38",
+        "limited": "\u9650\u6d41",
+        "abnormal": "\u5f02\u5e38",
+        "disabled": "\u7981\u7528",
+    }
+    expected = status_map.get(status_filter)
+    return status == expected if expected else status.lower() == status_filter
+
+
+def _account_matches_keyword(account: dict[str, Any], keyword: str) -> bool:
+    needle = keyword.strip().lower()
+    if not needle:
+        return True
+    fields = (
+        account.get("access_token"),
+        account.get("email"),
+        account.get("user_id"),
+        account.get("type"),
+        account.get("source_type"),
+        account.get("status"),
+        account.get("proxy"),
+        account.get("group_id"),
+    )
+    return any(needle in _clean_text(value).lower() for value in fields)
+
+
+def _account_matches_group(account: dict[str, Any], group_id: str) -> bool:
+    group_id = group_id.strip()
+    if not group_id or group_id == "all":
+        return True
+    current = _clean_text(account.get("group_id"))
+    if group_id == "__ungrouped__":
+        return not current
+    return current == group_id
+
+
+def _accounts_page(
+        *,
+        page: int,
+        page_size: int,
+        keyword: str,
+        status: str,
+        group_id: str,
+) -> dict[str, Any]:
+    items = account_service.list_accounts()
+    filtered = [
+        item for item in items
+        if _account_matches_keyword(item, keyword)
+        and _status_matches_filter(item, status)
+        and _account_matches_group(item, group_id)
+    ]
+    safe_page = max(1, page)
+    safe_page_size = max(1, min(page_size, 500))
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+    return {
+        "items": filtered[start:end],
+        "total": len(filtered),
+        "all_total": len(items),
+        "page": safe_page,
+        "page_size": safe_page_size,
+    }
+
+
+def _import_abnormal_tokens(access_tokens: list[str]) -> list[str]:
+    tokens = _unique_tokens(access_tokens)
+    result: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        account = account_service.get_account(token)
+        if not account or not _status_matches_filter(account, "abnormal"):
+            continue
+        current_token = _clean_text(account.get("access_token")) or token
+        if current_token and current_token not in seen:
+            seen.add(current_token)
+            result.append(current_token)
+    return result
 
 
 def _account_zip_bytes(items: list[dict[str, str]]) -> bytes:
@@ -208,9 +397,53 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(authorization: str | None = Header(default=None)):
+    async def get_accounts(
+            page: int = Query(default=1, ge=1),
+            page_size: int = Query(default=500, ge=1, le=500),
+            keyword: str = "",
+            status: str = "all",
+            group_id: str = "all",
+            authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return {"items": account_service.list_accounts()}
+        return _accounts_page(
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            status=status,
+            group_id=group_id,
+        )
+
+    @router.get("/api/account-groups")
+    async def list_account_groups(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return _account_group_payload()
+
+    @router.post("/api/account-groups")
+    async def save_account_group(body: AccountGroupRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return _upsert_account_group(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.delete("/api/account-groups/{group_id}")
+    async def delete_account_group(group_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        normalized = _account_group_id(group_id)
+        groups = _config_dict_list("account_groups")
+        next_groups = [group for group in groups if _account_group_id(group.get("id")) != normalized]
+        if len(next_groups) == len(groups):
+            raise HTTPException(status_code=404, detail={"error": "account group not found"})
+        updated = config.update({"account_groups": next_groups})
+        for account in account_service.list_accounts():
+            if _clean_text(account.get("group_id")) == normalized:
+                account_service.update_account(account.get("access_token", ""), {"group_id": ""}, quiet=True)
+        return {
+            "deleted": normalized,
+            **_account_group_payload(updated.get("account_groups", [])),
+            "items": account_service.list_accounts(),
+        }
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
@@ -221,21 +454,32 @@ def create_router() -> APIRouter:
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         if account_payloads:
-            result = account_service.add_account_items(account_payloads)
+            result = account_service.add_account_items(account_payloads, return_items=body.return_items)
             payload_token_set = set(_unique_tokens(payload_tokens))
             extra_tokens = [token for token in tokens if token not in payload_token_set]
             if extra_tokens:
-                extra_result = account_service.add_accounts(extra_tokens)
+                extra_result = account_service.add_accounts(extra_tokens, return_items=body.return_items)
                 result["added"] = int(result.get("added") or 0) + int(extra_result.get("added") or 0)
                 result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
         else:
-            result = account_service.add_accounts(tokens)
-        refresh_result = account_service.refresh_accounts(tokens)
+            result = account_service.add_accounts(tokens, return_items=body.return_items)
+        if not body.refresh:
+            return {
+                **result,
+                "refreshed": 0,
+                "errors": [],
+                "items": result.get("items", []) if body.return_items else [],
+            }
+        refresh_result = account_service.refresh_accounts(
+            tokens,
+            defer_invalid_removal=False,
+            remove_invalid=False,
+        )
         return {
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", result.get("items", [])),
+            "items": refresh_result.get("items", result.get("items", [])) if body.return_items else [],
         }
 
     @router.delete("/api/accounts")
@@ -244,7 +488,26 @@ def create_router() -> APIRouter:
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        return account_service.delete_accounts(tokens, return_items=False)
+
+    @router.post("/api/accounts/import-cleanup")
+    async def cleanup_imported_abnormal_accounts(
+            body: AccountImportCleanupRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        tokens = _unique_tokens(body.access_tokens)
+        if not tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+        abnormal_tokens = _import_abnormal_tokens(tokens)
+        removed = 0
+        if body.remove and abnormal_tokens:
+            removed = int(account_service.delete_accounts(abnormal_tokens, return_items=False).get("removed") or 0)
+        return {
+            "checked": len(tokens),
+            "abnormal": len(abnormal_tokens),
+            "removed": removed,
+        }
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
@@ -336,13 +599,68 @@ def create_router() -> APIRouter:
         access_token = str(body.access_token or "").strip()
         if not access_token:
             raise HTTPException(status_code=400, detail={"error": "access_token is required"})
-        updates = {key: value for key, value in {"type": body.type, "status": body.status, "quota": body.quota, "proxy": body.proxy}.items() if value is not None}
+        updates = {
+            key: value
+            for key, value in {
+                "type": body.type,
+                "source_type": body.source_type,
+                "status": body.status,
+                "quota": body.quota,
+                "proxy": body.proxy,
+                "group_id": body.group_id,
+            }.items()
+            if value is not None
+        }
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
         account = account_service.update_account(access_token, updates)
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         return {"item": account, "items": account_service.list_accounts()}
+
+    @router.post("/api/accounts/batch-update")
+    async def batch_update_accounts(body: AccountBatchUpdateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        access_tokens = _unique_tokens(body.access_tokens)
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+        updates = {key: value for key, value in {"status": body.status}.items() if value is not None}
+        if not updates:
+            raise HTTPException(status_code=400, detail={"error": "no updates provided"})
+        updated = 0
+        errors: list[str] = []
+        for token in access_tokens:
+            account = account_service.update_account(token, updates, quiet=True)
+            if account is None:
+                errors.append(f"{token[:6]}... not found")
+            else:
+                updated += 1
+        return {"updated": updated, "errors": errors, "items": account_service.list_accounts()}
+
+    @router.post("/api/accounts/group")
+    async def bind_accounts_group(body: AccountGroupBindRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        access_tokens = _unique_tokens(body.access_tokens)
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
+        group_id = "" if body.group_id.strip() == "__ungrouped__" else _account_group_id(body.group_id)
+        if group_id and not any(group.get("id") == group_id for group in _account_group_payload()["groups"]):
+            raise HTTPException(status_code=404, detail={"error": "account group not found"})
+        updated = 0
+        errors: list[str] = []
+        for token in access_tokens:
+            account = account_service.update_account(token, {"group_id": group_id}, quiet=True)
+            if account is None:
+                errors.append(f"{token[:6]}... not found")
+            else:
+                updated += 1
+        return {
+            "updated": updated,
+            "errors": errors,
+            "group_id": group_id,
+            **_account_group_payload(),
+            "items": account_service.list_accounts(),
+        }
 
     @router.post("/api/accounts/oauth/start")
     async def start_oauth_login(

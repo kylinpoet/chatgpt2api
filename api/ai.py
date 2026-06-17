@@ -65,6 +65,7 @@ class SearchRequest(BaseModel):
 
 class EditableFileTaskRequest(BaseModel):
     prompt: str = ""
+    kind: str = "ppt"
     base64_images: list[str] = Field(default_factory=list)
     client_task_id: str | None = None
 
@@ -179,6 +180,27 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         task_ids = [item.strip() for item in ids.split(",") if item.strip()]
         return await run_in_threadpool(editable_file_task_service.list_tasks, identity, task_ids)
+
+    @router.post("/v1/editable-file-tasks")
+    async def create_editable_file_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        kind = (body.kind or "ppt").strip().lower()
+        if kind not in {"ppt", "psd"}:
+            raise HTTPException(status_code=400, detail={"error": "kind must be ppt or psd"})
+        endpoint = f"/v1/{kind}/generations"
+        await filter_or_log(
+            LoggedCall(identity, endpoint, "gpt-5-5-thinking", f"{kind.upper()} generation task", request_text=body.prompt),
+            body.prompt,
+        )
+        submit = editable_file_task_service.submit_psd if kind == "psd" else editable_file_task_service.submit_ppt
+        return await run_in_threadpool(
+            submit,
+            identity,
+            client_task_id=body.client_task_id or "",
+            prompt=body.prompt,
+            base64_images=body.base64_images,
+            base_url=resolve_image_base_url(request),
+        )
 
     @router.get("/files/{file_path:path}")
     async def download_editable_file(file_path: str):

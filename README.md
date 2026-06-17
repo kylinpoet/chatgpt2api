@@ -1,7 +1,72 @@
+<p align="center">
+  <img src="web-vue/public/logo.svg" width="120" alt="ChatGPT2API logo" />
+</p>
 <h1 align="center">ChatGPT2API</h1>
 
+<p align="center">ChatGPT 官网能力 → OpenAI 兼容 API 网关</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/License-CNC--1.0-red.svg" />
+  <img src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/FastAPI-ready-009688?logo=fastapi&logoColor=white" />
+  <img src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js&logoColor=white" />
+  <img src="https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white" />
+  <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" />
+</p>
+<p align="center"><strong>当前稳定版本：v2.0.0</strong> | <a href="https://github.com/yukkcat/chatgpt2api/releases/tag/v2.0.0">发布说明</a> | <a href="https://github.com/yukkcat/chatgpt2api/releases">全部版本</a></p>
 
-<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+---
+
+## 项目定位
+
+本仓库基于原版 [basketikun/chatgpt2api](https://github.com/basketikun/chatgpt2api) 整理维护，核心仍是把 ChatGPT 官网能力封装为 OpenAI 兼容 API。
+
+本版本使用新的 Vue 控制台，主题和交互与原版前端不同；除前端实现差异外，接口、配置和部署口径会尽量保持与原版一致。
+
+发布仓库只保留主服务、Vue 控制台和必要部署文件；旧版前端、测试文件、临时文档和运行产物不进入发布内容。
+
+---
+
+## 核心能力
+
+- OpenAI 兼容接口，可对接常见 OpenAI SDK、上游网关或客户端。
+- ChatGPT 官网图片链路，覆盖图片生成、图片编辑、多图组图编辑和图片任务追踪。
+- Vue 管理控制台，包含概览中心、账号管理、日志管理、图片管理、代理管理、注册账号、图像创作、调试中心和系统设置。
+- 多账号调度，支持账号导入、刷新、重新登录、额度读取、异常账号处理和批量管理。
+- 注册账号链路，支持临时邮箱 / Outlook Token 邮箱读取、验证码等待、注册进度和实时日志。
+- 配置管理，覆盖用户密钥、WebDAV、AI 审核、R2 备份、CPA / Sub2API 连接和运行参数。
+- 自托管部署，支持 Docker、WARP / Privoxy / FlareSolverr 稳定代理、JSON / SQLite / PostgreSQL / Git 存储后端。
+
+---
+
+## 功能架构
+
+```mermaid
+flowchart TB
+  Admin["管理员"] --> Console["Vue 管理控制台"]
+  User["普通用户"] --> ImageStudio["图像创作"]
+  Client["OpenAI 兼容客户端"] --> Gateway["ChatGPT2API 网关"]
+
+  subgraph ConsoleModules["控制台模块"]
+    Dashboard["概览中心"]
+    Accounts["账号管理"]
+    Logs["日志管理"]
+    Gallery["图片管理"]
+    Proxy["代理管理"]
+    Register["注册账号"]
+    Settings["系统设置"]
+    Debug["调试中心"]
+  end
+
+  Console --> ConsoleModules
+  ImageStudio --> Gateway
+  Gateway --> Runtime["ChatGPT 官网链路"]
+  ConsoleModules --> AdminAPI["管理接口"]
+  AdminAPI --> Domain["账号池 / 配置 / 日志 / 图片任务"]
+  Runtime --> Domain
+  Domain --> Storage["data 目录 / SQLite / PostgreSQL / Git"]
+```
+
+---
 
 > [!WARNING]
 > 免责声明：
@@ -17,15 +82,28 @@
 
 ## 快速开始
 
+### 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/deploy/install.sh | sudo bash
+```
+
+固定安装当前稳定版：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.0.0/deploy/install.sh | sudo bash -s -- --branch v2.0.0
+```
+
 ### Docker 运行
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone https://github.com/yukkcat/chatgpt2api.git
 cd chatgpt2api
+cp .env.example .env
 docker compose up -d
 ```
 
-启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
+启动前请先在 `.env` 中设置 `CHATGPT2API_AUTH_KEY`，也可以继续在 `config.json` 中填写 `auth-key`。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
@@ -37,7 +115,7 @@ docker compose up -d
 
 ```bash
 cp .env.example .env
-docker compose -f docker-compose.warp.yml up -d --build
+docker compose -f docker-compose.warp.yml up -d
 ```
 
 该 compose 会启动：
@@ -57,7 +135,7 @@ docker compose -f docker-compose.warp.yml up -d --build
 启动后端：
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone https://github.com/yukkcat/chatgpt2api.git
 cd chatgpt2api
 uv sync
 uv run main.py
@@ -66,18 +144,16 @@ uv run main.py
 启动前端：
 
 ```bash
-cd chatgpt2api/web
-bun install
-bun run dev
+cd chatgpt2api/web-vue
+npm install
+npm run dev
 ```
 
 后续更新新版本：
 
 ```bash
-docker pull ghcr.io/basketikun/chatgpt2api:latest
-docker-compose down
-docker-compose up -d
-
+git pull
+docker compose up -d
 ```
 
 ### 存储后端配置
@@ -97,7 +173,7 @@ environment:
   - DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
-## 功能
+## 功能详情
 
 ### API 兼容能力
 
@@ -137,23 +213,25 @@ environment:
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 
-### 实验性 / 规划中
+### 状态说明
 
-- 详细状态说明见：[功能清单](./docs/feature-status.en.md)
+- 发布变更以 [CHANGELOG.md](./CHANGELOG.md) 为准。
+- 本地开发过程中的临时文档、测试记录和运行产物不作为发布仓库内容。
 
 ## 效果展示
 
 <table width="100%">
   <tr>
-    <td width="50%"><img src="https://i.ibb.co/Jj8nfwwP/image.png" alt="image" border="0"></td>
-    <td width="50%"><img src="https://i.ibb.co/pqf235v/image-edit.png" alt="image edit" border="0"></td>
+    <td width="50%"><img src="docs/images/1.png" alt="screenshot 1" border="0"></td>
+    <td width="50%"><img src="docs/images/2.png" alt="screenshot 2" border="0"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="https://i.ibb.co/tPcqtVfd/chery-studio.png" alt="chery studio" border="0"></td>
-    <td width="50%"><img src="https://i.ibb.co/PsT9YHBV/account-pool.png" alt="account pool" border="0"></td>
+    <td width="50%"><img src="docs/images/3.png" alt="screenshot 3" border="0"></td>
+    <td width="50%"><img src="docs/images/4.png" alt="screenshot 4" border="0"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="https://i.ibb.co/rRWLG08q/new-api.png" alt="new api" border="0"></td>
+    <td width="50%"><img src="docs/images/5.png" alt="screenshot 5" border="0"></td>
+    <td width="50%"><img src="docs/images/6.png" alt="screenshot 6" border="0"></td>
   </tr>
 </table>
 
@@ -348,9 +426,7 @@ curl http://localhost:8000/v1/responses \
 
 学 AI , 上 L 站：[LinuxDO](https://linux.do)
 
-## Contributors
-
-感谢所有为本项目做出贡献的开发者：
+## 原版项目贡献者
 
 <a href="https://github.com/basketikun/chatgpt2api/graphs/contributors">
   <img alt="Contributors" src="https://contrib.rocks/image?repo=basketikun/chatgpt2api" />
@@ -358,4 +434,4 @@ curl http://localhost:8000/v1/responses \
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=basketikun/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=basketikun%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=yukkcat/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=yukkcat%2Fchatgpt2api&type=date&legend=top-left)

@@ -58,6 +58,9 @@ class AccountService:
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
+        storage_path = getattr(self.storage, "file_path", None)
+        if isinstance(storage_path, Path):
+            return storage_path.with_name(".cumulative_total")
         from services.config import DATA_DIR
         return DATA_DIR / ".cumulative_total"
 
@@ -139,6 +142,13 @@ class AccountService:
         return int(account.get("quota") or 0) > 0
 
     @classmethod
+    def _is_unlimited_image_quota_account(cls, account: dict) -> bool:
+        if not isinstance(account, dict) or not bool(account.get("image_quota_unknown")):
+            return False
+        account_type = (cls._normalize_account_type(account.get("type")) or "").lower()
+        return account_type in {"pro", "prolite"}
+
+    @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
         if not plan_type:
             return True
@@ -188,6 +198,60 @@ class AccountService:
         }
         return aliases.get(compact) or aliases.get(key) or raw
 
+    @staticmethod
+    def _has_value(value: object) -> bool:
+        return value is not None and str(value).strip() != ""
+
+    @staticmethod
+    def _bool_value(value: object, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raw = str(value or "").strip().lower()
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return default
+
+    @classmethod
+    def _quota_value(cls, value: object, default: int = 0) -> int:
+        if not cls._has_value(value):
+            return max(0, int(default or 0))
+        try:
+            return max(0, int(float(str(value).strip())))
+        except (TypeError, ValueError):
+            return max(0, int(default or 0))
+
+    @classmethod
+    def _extract_image_quota_from_limits(cls, limits_progress: object) -> tuple[int | None, str | None, bool | None]:
+        if not isinstance(limits_progress, list):
+            return None, None, None
+        if not limits_progress:
+            return None, None, None
+
+        for item in limits_progress:
+            if not isinstance(item, dict):
+                continue
+            feature = str(
+                item.get("feature_name")
+                or item.get("feature")
+                or item.get("name")
+                or item.get("type")
+                or ""
+            ).strip().lower()
+            if feature in {"image_gen", "image_generation", "image", "images"}:
+                restore_at = str(
+                    item.get("reset_after")
+                    or item.get("restore_at")
+                    or item.get("reset_at")
+                    or ""
+                ).strip() or None
+                return cls._quota_value(item.get("remaining"), 0), restore_at, False
+
+        return None, None, True
+
     def _search_account_type(self, payload: object) -> str | None:
         if isinstance(payload, dict):
             for key in ("plan_type", "account_plan", "account_type", "subscription_type", "type"):
@@ -217,10 +281,12 @@ class AccountService:
         if str(normalized.get("type") or "").strip().lower() == "codex":
             normalized["export_type"] = "codex"
             normalized.pop("type", None)
+        limits_progress = normalized.get("limits_progress")
+        limits_progress = limits_progress if isinstance(limits_progress, list) else []
+        derived_quota, derived_restore_at, derived_unknown = self._extract_image_quota_from_limits(limits_progress)
+        has_explicit_quota = self._has_value(normalized.get("quota"))
         normalized["type"] = normalized.get("type") or "free"
         normalized["status"] = normalized.get("status") or "正常"
-        normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
-        normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
@@ -228,9 +294,25 @@ class AccountService:
         if not source_type and str(normalized.get("export_type") or "").strip().lower() == "codex":
             source_type = "codex"
         normalized["source_type"] = self._normalize_source_type(source_type)
-        limits_progress = normalized.get("limits_progress")
-        normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
+        if not has_explicit_quota and derived_quota is not None:
+            normalized["quota"] = derived_quota
+        normalized["quota"] = self._quota_value(normalized.get("quota"), 0)
+        if derived_unknown is not None and not self._has_value(normalized.get("image_quota_unknown")):
+            normalized["image_quota_unknown"] = derived_unknown
+        normalized["image_quota_unknown"] = self._bool_value(normalized.get("image_quota_unknown"), False)
+        if (
+            normalized["source_type"] == "codex"
+            and normalized["quota"] == 0
+            and not limits_progress
+            and normalized.get("status") not in {"限流", "异常", "禁用"}
+            and not normalized.get("last_token_refresh_at")
+            and not normalized.get("last_used_at")
+        ):
+            normalized["image_quota_unknown"] = True
+        normalized["limits_progress"] = limits_progress
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
+        if derived_restore_at and not normalized.get("restore_at"):
+            normalized["restore_at"] = derived_restore_at
         normalized["restore_at"] = normalized.get("restore_at") or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
@@ -1032,11 +1114,18 @@ class AccountService:
             self._accounts[access_token] = account
             self._save_accounts()
 
-    def remove_invalid_token(self, access_token: str, event: str, quiet: bool = False) -> bool:
-        if not config.auto_remove_invalid_accounts:
+    def remove_invalid_token(
+        self,
+        access_token: str,
+        event: str,
+        quiet: bool = False,
+        remove: bool | None = None,
+    ) -> bool:
+        should_remove = config.auto_remove_invalid_accounts if remove is None else remove
+        if not should_remove:
             self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=quiet)
             return False
-        removed = bool(self.delete_accounts([access_token])["removed"])
+        removed = bool(self.delete_accounts([access_token], return_items=False)["removed"])
         if removed:
             log_service.add(LOG_TYPE_ACCOUNT, "自动移除异常账号",
                             {"source": event, "token": anonymize_token(access_token)})
@@ -1110,24 +1199,24 @@ class AccountService:
             payload["type"] = str(payload.get("plan_type") or "").strip()
         return payload
 
-    def add_account_items(self, items: list[dict]) -> dict:
+    def add_account_items(self, items: list[dict], return_items: bool = True) -> dict:
         payloads = [
             payload
             for item in items
             if (payload := self._prepare_account_payload(item)) is not None
         ]
-        return self._add_account_payloads(payloads)
+        return self._add_account_payloads(payloads, return_items=return_items)
 
-    def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
+    def add_accounts(self, tokens: list[str], source_type: str = "web", return_items: bool = True) -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0, "items": self.list_accounts() if return_items else []}
         return self._add_account_payloads([
             {"access_token": token, "source_type": self._normalize_source_type(source_type)}
             for token in tokens
-        ])
+        ], return_items=return_items)
 
-    def _add_account_payloads(self, payloads: list[dict]) -> dict:
+    def _add_account_payloads(self, payloads: list[dict], return_items: bool = True) -> dict:
         deduped: dict[str, dict] = {}
         for payload in payloads:
             if not isinstance(payload, dict):
@@ -1139,7 +1228,7 @@ class AccountService:
             deduped[access_token] = {**current, **payload, "access_token": access_token}
 
         if not deduped:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0, "items": self.list_accounts() if return_items else []}
 
         with self._lock:
             added = 0
@@ -1167,15 +1256,15 @@ class AccountService:
                 if account is not None:
                     self._accounts[access_token] = account
             self._save_accounts()
-            items = [dict(item) for item in self._accounts.values()]
+            items = [dict(item) for item in self._accounts.values()] if return_items else []
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items}
 
-    def delete_accounts(self, tokens: list[str]) -> dict:
+    def delete_accounts(self, tokens: list[str], return_items: bool = True) -> dict:
         target_set = set(token for token in tokens if token)
         if not target_set:
-            return {"removed": 0, "items": self.list_accounts()}
+            return {"removed": 0, "items": self.list_accounts() if return_items else []}
         with self._lock:
             target_set = {self._resolve_access_token_locked(token) for token in target_set if token}
             removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
@@ -1193,7 +1282,7 @@ class AccountService:
                     self._index = 0
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = [dict(item) for item in self._accounts.values()]
+            items = [dict(item) for item in self._accounts.values()] if return_items else []
         return {"removed": removed, "items": items}
 
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
@@ -1322,6 +1411,7 @@ class AccountService:
         access_token: str,
         event: str = "fetch_remote_info",
         defer_invalid_removal: bool = True,
+        remove_invalid: bool | None = None,
     ) -> dict[str, Any] | None:
         if not access_token:
             raise ValueError("access_token is required")
@@ -1342,7 +1432,7 @@ class AccountService:
                         str(retry_exc),
                         defer_invalid_removal=defer_invalid_removal,
                     ):
-                        self.remove_invalid_token(refreshed_token, event)
+                        self.remove_invalid_token(refreshed_token, event, remove=remove_invalid)
                     raise
                 active_token = refreshed_token
             else:
@@ -1352,7 +1442,7 @@ class AccountService:
                     str(exc),
                     defer_invalid_removal=defer_invalid_removal,
                 ):
-                    self.remove_invalid_token(active_token, event)
+                    self.remove_invalid_token(active_token, event, remove=remove_invalid)
                 raise
         self._record_refresh_success(active_token)
         return self.update_account(active_token, result)
@@ -1462,6 +1552,7 @@ class AccountService:
         access_tokens: list[str],
         progress_id: str | None = None,
         defer_invalid_removal: bool = True,
+        remove_invalid: bool | None = None,
     ) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
@@ -1481,7 +1572,7 @@ class AccountService:
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
             futures = {
-                executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal): token
+                executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal, remove_invalid): token
                 for token in access_tokens
             }
             for future in as_completed(futures):
@@ -1663,8 +1754,14 @@ class AccountService:
         limited = sum(1 for a in items if a.get("status") == "限流")
         abnormal = sum(1 for a in items if a.get("status") == "异常")
         disabled = sum(1 for a in items if a.get("status") == "禁用")
-        total_quota = sum(max(0, int(a.get("quota") or 0)) for a in items if a.get("status") == "正常")
-        unlimited = sum(1 for a in items if a.get("status") == "正常" and bool(a.get("image_quota_unknown")))
+        normal_items = [a for a in items if a.get("status") == "正常"]
+        total_quota = sum(max(0, int(a.get("quota") or 0)) for a in normal_items)
+        unlimited = sum(1 for a in normal_items if self._is_unlimited_image_quota_account(a))
+        unknown_quota = sum(
+            1
+            for a in normal_items
+            if bool(a.get("image_quota_unknown")) and not self._is_unlimited_image_quota_account(a)
+        )
         total_success = sum(int(a.get("success") or 0) for a in items)
         total_fail = sum(int(a.get("fail") or 0) for a in items)
         by_type = {}
@@ -1680,6 +1777,7 @@ class AccountService:
             "disabled": disabled,
             "total_quota": total_quota,
             "unlimited_quota_count": unlimited,
+            "unknown_quota_count": unknown_quota,
             "total_success": total_success,
             "total_fail": total_fail,
             "by_type": by_type,

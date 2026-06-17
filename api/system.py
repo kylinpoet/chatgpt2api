@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.backup_service import BackupError, backup_service
@@ -23,8 +26,10 @@ from services.image_service import (
 )
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
-from services.log_service import log_service
+from services.log_service import LOG_TYPE_CALL, log_service
+from services.model_catalog_service import get_model_catalog
 from services.proxy_service import proxy_settings, test_clearance, test_proxy
+from services.runtime_log_service import list_runtime_logs
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -37,6 +42,37 @@ class ProxyTestRequest(BaseModel):
 
 class ClearanceTestRequest(BaseModel):
     target_url: str = "https://chatgpt.com"
+
+
+class ProxyProfileRequest(BaseModel):
+    id: str = ""
+    name: str = ""
+    proxy: str = ""
+    no_proxy: str = ""
+    enabled: bool = True
+    notes: str = ""
+    create_only: bool = False
+
+
+class ProxyProfileTestRequest(BaseModel):
+    id: str = ""
+    url: str = ""
+
+
+class ProxyGroupRequest(BaseModel):
+    id: str = ""
+    name: str = ""
+    strategy: str = "round_robin"
+    enabled: bool = True
+    notes: str = ""
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    create_only: bool = False
+
+
+class ProxyGroupTestRequest(BaseModel):
+    id: str = ""
+    node_id: str = ""
+    url: str = ""
 
 
 class ImageDeleteRequest(BaseModel):
@@ -58,6 +94,314 @@ class BackupDeleteRequest(BaseModel):
     key: str = ""
 
 
+def _clean_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+_NON_MODEL_KEYS = {
+    "",
+    "-",
+    "auto",
+    "default",
+    "unknown",
+    "null",
+    "none",
+    "low",
+    "medium",
+    "high",
+    "standard",
+    "hd",
+    "portrait",
+    "landscape",
+    "square",
+    "vertical",
+    "horizontal",
+    "image",
+    "images",
+    "text",
+    "chat",
+    "generation",
+    "generations",
+    "edit",
+    "edits",
+}
+
+
+def _looks_like_model_label(value: object) -> bool:
+    label = _clean_text(value)
+    key = label.lower()
+    if key in _NON_MODEL_KEYS or key.startswith("/"):
+        return False
+    if re.fullmatch(r"\d+\s*[x×]\s*\d+", key) or re.fullmatch(r"\d+\s*:\s*\d+", key):
+        return False
+    return bool(label)
+
+
+def _slug_id(value: object) -> str:
+    raw = _clean_text(value).lower()
+    chars: list[str] = []
+    for char in raw:
+        if char.isalnum() or char in {"-", "_"}:
+            chars.append(char)
+        elif char.isspace():
+            chars.append("-")
+    return "".join(chars).strip("-_")
+
+
+def _config_dict_list(key: str) -> list[dict[str, Any]]:
+    raw = config.get().get(key)
+    if not isinstance(raw, list):
+        return []
+    return [dict(item) for item in raw if isinstance(item, dict)]
+
+
+def _proxy_profile_id(value: object) -> str:
+    raw = _clean_text(value)
+    if raw.lower().startswith("profile:"):
+        raw = raw.split(":", 1)[1]
+    return _slug_id(raw)
+
+
+def _proxy_group_id(value: object) -> str:
+    raw = _clean_text(value)
+    if raw.lower().startswith("group:"):
+        raw = raw.split(":", 1)[1]
+    return _slug_id(raw)
+
+
+def _proxy_profiles_payload() -> dict[str, Any]:
+    return {"profiles": _config_dict_list("proxy_profiles")}
+
+
+def _proxy_groups_payload() -> dict[str, Any]:
+    return {"groups": _config_dict_list("proxy_groups")}
+
+
+def _upsert_proxy_profile(body: ProxyProfileRequest) -> dict[str, Any]:
+    profile_id = _proxy_profile_id(body.id or body.name)
+    if not profile_id:
+        raise ValueError("profile id is required")
+    profiles = _config_dict_list("proxy_profiles")
+    exists = any(profile.get("id") == profile_id for profile in profiles)
+    if body.create_only and exists:
+        raise ValueError("proxy profile already exists")
+    item = {
+        "id": profile_id,
+        "name": body.name or profile_id,
+        "proxy": body.proxy,
+        "no_proxy": body.no_proxy,
+        "enabled": body.enabled,
+        "notes": body.notes,
+    }
+    next_profiles = [profile for profile in profiles if profile.get("id") != profile_id]
+    next_profiles.append(item)
+    updated = config.update({"proxy_profiles": next_profiles})
+    profiles = [dict(profile) for profile in updated.get("proxy_profiles", []) if isinstance(profile, dict)]
+    return {"profile": item, "profiles": profiles}
+
+
+def _upsert_proxy_group(body: ProxyGroupRequest) -> dict[str, Any]:
+    group_id = _proxy_group_id(body.id or body.name)
+    if not group_id:
+        raise ValueError("proxy group id is required")
+    groups = _config_dict_list("proxy_groups")
+    exists = any(group.get("id") == group_id for group in groups)
+    if body.create_only and exists:
+        raise ValueError("proxy group already exists")
+    nodes: list[dict[str, Any]] = []
+    for index, node in enumerate(body.nodes):
+        if not isinstance(node, dict):
+            continue
+        node_id = _slug_id(node.get("id") or node.get("name") or f"node-{index + 1}") or f"node-{index + 1}"
+        nodes.append(
+            {
+                **node,
+                "id": node_id,
+                "name": _clean_text(node.get("name")) or node_id,
+                "url": _clean_text(node.get("url")),
+                "enabled": bool(node.get("enabled", True)),
+            }
+        )
+    item = {
+        "id": group_id,
+        "name": body.name or group_id,
+        "strategy": body.strategy or "round_robin",
+        "enabled": body.enabled,
+        "notes": body.notes,
+        "nodes": nodes,
+    }
+    next_groups = [group for group in groups if group.get("id") != group_id]
+    next_groups.append(item)
+    updated = config.update({"proxy_groups": next_groups})
+    groups = [dict(group) for group in updated.get("proxy_groups", []) if isinstance(group, dict)]
+    return {"group": item, "groups": groups}
+
+
+def _resolve_profile_proxy(profile_id: str) -> str:
+    normalized = _proxy_profile_id(profile_id)
+    for profile in _config_dict_list("proxy_profiles"):
+        if profile.get("id") == normalized and profile.get("enabled", True):
+            return _clean_text(profile.get("proxy"))
+    return ""
+
+
+def _increment(counter: dict[str, int], key: object, default: str = "unknown") -> None:
+    label = _clean_text(key) or default
+    counter[label] = counter.get(label, 0) + 1
+
+
+def _detail_value(item: dict[str, Any], key: str, default: object = "") -> object:
+    detail = item.get("detail")
+    if isinstance(detail, dict):
+        value = detail.get(key)
+        if value not in (None, ""):
+            return value
+    value = item.get(key)
+    return default if value in (None, "") else value
+
+
+def _parse_log_time(value: object) -> datetime | None:
+    raw = _clean_text(value)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> dict[str, Any]:
+    total = len(items)
+    success = 0
+    failed = 0
+    by_endpoint: dict[str, int] = {}
+    by_model: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    by_error_code: dict[str, int] = {}
+    recent_failures: list[dict[str, Any]] = []
+
+    bucket_count = {"24h": 24, "7d": 7, "30d": 30}.get(time_range, 24)
+    bucket_delta = timedelta(hours=1) if time_range == "24h" else timedelta(days=1)
+    bucket_format = "%H:00" if time_range == "24h" else "%m-%d"
+    raw_now = datetime.now()
+    current_bucket_start = (
+        raw_now.replace(minute=0, second=0, microsecond=0)
+        if time_range == "24h"
+        else raw_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    starts = [current_bucket_start - bucket_delta * (bucket_count - 1 - index) for index in range(bucket_count)]
+    labels = [start.strftime(bucket_format) for start in starts]
+    total_requests = [0] * bucket_count
+    success_requests = [0] * bucket_count
+    failed_requests = [0] * bucket_count
+    rate_limited_requests = [0] * bucket_count
+    model_requests: dict[str, list[int]] = {}
+    model_total_times: dict[str, list[float]] = {}
+    model_time_counts: dict[str, list[int]] = {}
+
+    def bucket_index(dt: datetime | None) -> int | None:
+        if dt is None:
+            return None
+        if time_range == "24h":
+            bucket_start = dt.replace(minute=0, second=0, microsecond=0)
+            idx = int((bucket_start - starts[0]).total_seconds() // 3600)
+        else:
+            idx = (dt.date() - starts[0].date()).days
+        return idx if 0 <= idx < bucket_count else None
+
+    for item in items:
+        status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
+        endpoint = _clean_text(_detail_value(item, "endpoint"))
+        model = _clean_text(_detail_value(item, "model"))
+        error_code = _clean_text(_detail_value(item, "error_code"))
+        dt = _parse_log_time(_detail_value(item, "started_at", item.get("time")))
+        idx = bucket_index(dt)
+
+        is_failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
+        if is_failed:
+            failed += 1
+            if len(recent_failures) < 10:
+                recent_failures.append(
+                    {
+                        "id": item.get("id"),
+                        "time": item.get("time") or _detail_value(item, "started_at"),
+                        "summary": item.get("summary"),
+                        "endpoint": endpoint,
+                        "error_code": error_code,
+                        "stage": _detail_value(item, "stage"),
+                        "reason": _detail_value(item, "reason", _detail_value(item, "error")),
+                        "conversation_id": _detail_value(item, "conversation_id"),
+                    }
+                )
+        else:
+            success += 1
+
+        if status:
+            _increment(by_status, status)
+        if endpoint.startswith("/"):
+            _increment(by_endpoint, endpoint)
+        if _looks_like_model_label(model):
+            _increment(by_model, model)
+        if error_code:
+            _increment(by_error_code, error_code)
+
+        if idx is not None:
+            total_requests[idx] += 1
+            if is_failed:
+                if error_code in {"rate_limited", "rate_limit", "429"}:
+                    rate_limited_requests[idx] += 1
+                else:
+                    failed_requests[idx] += 1
+            else:
+                success_requests[idx] += 1
+            if _looks_like_model_label(model):
+                model_requests.setdefault(model, [0] * bucket_count)[idx] += 1
+                duration_raw = _detail_value(item, "duration_ms", None)
+                try:
+                    duration_ms = max(0.0, float(duration_raw))
+                except (TypeError, ValueError):
+                    duration_ms = None
+                if duration_ms is not None:
+                    model_total_times.setdefault(model, [0.0] * bucket_count)[idx] += duration_ms
+                    model_time_counts.setdefault(model, [0] * bucket_count)[idx] += 1
+
+    model_avg_times = {
+        model: [
+            round(total / counts[index], 2) if counts[index] > 0 else 0.0
+            for index, total in enumerate(totals)
+        ]
+        for model, totals in model_total_times.items()
+        for counts in [model_time_counts.get(model, [0] * bucket_count)]
+    }
+
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "by_endpoint": by_endpoint,
+        "by_model": by_model,
+        "by_status": by_status,
+        "by_error_code": by_error_code,
+        "recent_failures": recent_failures,
+        "trend": {
+            "labels": labels,
+            "total_requests": total_requests,
+            "success_requests": success_requests,
+            "failed_requests": failed_requests,
+            "rate_limited_requests": rate_limited_requests,
+            "model_requests": model_requests,
+            "model_ttfb_times": {},
+            "model_total_times": model_avg_times,
+        },
+    }
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
@@ -66,6 +410,26 @@ def create_router(app_version: str) -> APIRouter:
         identity = require_identity(authorization)
         return {
             "ok": True,
+            "authenticated": True,
+            "version": app_version,
+            "role": identity.get("role"),
+            "subject_id": identity.get("id"),
+            "name": identity.get("name"),
+        }
+
+    @router.get("/auth/status")
+    async def auth_status(authorization: str | None = Header(default=None)):
+        try:
+            identity = require_identity(authorization)
+        except HTTPException:
+            return {
+                "ok": False,
+                "authenticated": False,
+                "version": app_version,
+            }
+        return {
+            "ok": True,
+            "authenticated": True,
             "version": app_version,
             "role": identity.get("role"),
             "subject_id": identity.get("id"),
@@ -75,6 +439,93 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/version")
     async def get_version():
         return {"version": app_version}
+
+    @router.get("/public/stats")
+    async def public_stats():
+        from services.account_service import account_service as acct_svc
+
+        stats = acct_svc.get_stats()
+        logs = log_service.list(type=LOG_TYPE_CALL, limit=500)
+        recent_cutoff = datetime.now() - timedelta(minutes=1)
+        recent = [
+            item for item in logs
+            if (_parse_log_time(_detail_value(item, "started_at", item.get("time"))) or datetime.min) >= recent_cutoff
+        ]
+        rpm = len(recent)
+        load_status = "high" if rpm >= 60 else "medium" if rpm >= 20 else "low"
+        load_color = {"high": "#ef4444", "medium": "#f59e0b", "low": "#22c55e"}[load_status]
+        return {
+            "total_visitors": int(stats.get("total") or 0),
+            "total_requests": len(logs),
+            "requests_per_minute": rpm,
+            "load_status": load_status,
+            "load_color": load_color,
+        }
+
+    @router.get("/public/display")
+    async def public_display():
+        public = config.get().get("public_display")
+        data = public if isinstance(public, dict) else {}
+        return {
+            "logo_url": str(data.get("logo_url") or ""),
+            "chat_url": str(data.get("chat_url") or ""),
+        }
+
+    @router.get("/public/log")
+    async def public_log(limit: int = Query(default=20, ge=1, le=100)):
+        items = log_service.list(type=LOG_TYPE_CALL, limit=limit)
+        groups = []
+        for item in items:
+            status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
+            failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
+            groups.append(
+                {
+                    "request_id": str(item.get("id") or ""),
+                    "start_time": str(item.get("time") or _detail_value(item, "started_at")),
+                    "status": "error" if failed else "success",
+                    "events": [
+                        {
+                            "time": str(item.get("time") or _detail_value(item, "started_at")),
+                            "type": "complete",
+                            "status": "error" if failed else "success",
+                            "content": str(item.get("summary") or _detail_value(item, "endpoint") or "调用日志"),
+                        }
+                    ],
+                }
+            )
+        return {"total": len(groups), "logs": groups}
+
+    @router.get("/public/uptime")
+    async def public_uptime(days: int = Query(default=90, ge=1, le=365)):
+        storage = config.get_storage_backend()
+        try:
+            storage_health = storage.health_check()
+            storage_ok = bool(storage_health.get("ok", True)) if isinstance(storage_health, dict) else True
+        except Exception:
+            storage_health = {}
+            storage_ok = False
+        now = datetime.now().isoformat(timespec="seconds")
+        return {
+            "updated_at": now,
+            "services": {
+                "api": {
+                    "name": "API",
+                    "status": "up",
+                    "uptime": 100,
+                    "total": 1,
+                    "success": 1,
+                    "heartbeats": [{"time": now, "success": True, "latency_ms": 0, "level": "up"}],
+                },
+                "storage": {
+                    "name": "Storage",
+                    "status": "up" if storage_ok else "warn",
+                    "uptime": 100 if storage_ok else 0,
+                    "total": 1,
+                    "success": 1 if storage_ok else 0,
+                    "heartbeats": [{"time": now, "success": storage_ok, "latency_ms": 0, "level": "up" if storage_ok else "warn"}],
+                },
+            },
+        }
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
@@ -93,6 +544,11 @@ def create_router(app_version: str) -> APIRouter:
             return {"config": config.update(body.model_dump(mode="python"))}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/model-catalog")
+    async def model_catalog(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return get_model_catalog()
 
     @router.get("/api/images")
     async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
@@ -128,19 +584,135 @@ def create_router(app_version: str) -> APIRouter:
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
-    async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_logs(
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = Query(default=200, ge=1, le=20000),
+        authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
+        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip(), limit=limit)}
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return log_service.delete(body.ids)
 
+    @router.get("/api/runtime-logs")
+    async def get_runtime_logs(
+        level: str = "",
+        search: str = "",
+        source: str = "",
+        limit: int = Query(default=300, ge=1, le=2000),
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        return list_runtime_logs(
+            level=level.strip(),
+            search=search.strip(),
+            source=source.strip(),
+            limit=limit,
+        )
+
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"result": await run_in_threadpool(test_proxy, (body.url or "").strip())}
+        candidate = (body.url or "").strip() or config.get_proxy_settings()
+        if not candidate:
+            raise HTTPException(status_code=400, detail={"error": "proxy url is required"})
+        return {"result": await run_in_threadpool(test_proxy, candidate)}
+
+    @router.get("/api/proxy/profiles")
+    async def list_proxy_profiles(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return _proxy_profiles_payload()
+
+    @router.post("/api/proxy/profiles")
+    async def save_proxy_profile(body: ProxyProfileRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return _upsert_proxy_profile(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.delete("/api/proxy/profiles/{profile_id}")
+    async def delete_proxy_profile(profile_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        normalized = _proxy_profile_id(profile_id)
+        profiles = _config_dict_list("proxy_profiles")
+        next_profiles = [profile for profile in profiles if profile.get("id") != normalized]
+        if len(next_profiles) == len(profiles):
+            raise HTTPException(status_code=404, detail={"error": "proxy profile not found"})
+        updated = config.update({"proxy_profiles": next_profiles})
+        return {"deleted": normalized, "profiles": updated.get("proxy_profiles", [])}
+
+    @router.post("/api/proxy/profiles/test")
+    async def test_proxy_profile_endpoint(body: ProxyProfileTestRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        candidate = (body.url or "").strip()
+        if not candidate and body.id.strip():
+            candidate = _resolve_profile_proxy(body.id)
+        if not candidate:
+            raise HTTPException(status_code=400, detail={"error": "proxy url or profile id is required"})
+        return {"result": await run_in_threadpool(test_proxy, candidate)}
+
+    @router.get("/api/proxy/groups")
+    async def list_proxy_groups(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return _proxy_groups_payload()
+
+    @router.post("/api/proxy/groups")
+    async def save_proxy_group(body: ProxyGroupRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return _upsert_proxy_group(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.delete("/api/proxy/groups/{group_id}")
+    async def delete_proxy_group(group_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        normalized = _proxy_group_id(group_id)
+        groups = _config_dict_list("proxy_groups")
+        next_groups = [group for group in groups if group.get("id") != normalized]
+        if len(next_groups) == len(groups):
+            raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
+        updated = config.update({"proxy_groups": next_groups})
+        return {"deleted": normalized, "groups": updated.get("proxy_groups", [])}
+
+    @router.post("/api/proxy/groups/test")
+    async def test_proxy_group_endpoint(body: ProxyGroupTestRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        explicit_url = (body.url or "").strip()
+        if explicit_url:
+            return {"result": await run_in_threadpool(test_proxy, explicit_url)}
+
+        group_id = _proxy_group_id(body.id)
+        if not group_id:
+            raise HTTPException(status_code=400, detail={"error": "proxy group id or url is required"})
+        group = next((item for item in _config_dict_list("proxy_groups") if item.get("id") == group_id), None)
+        if group is None:
+            raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
+        node_id = _slug_id(body.node_id)
+        nodes = [
+            node for node in group.get("nodes", [])
+            if isinstance(node, dict)
+            and node.get("enabled", True)
+            and _clean_text(node.get("url"))
+            and (not node_id or node.get("id") == node_id)
+        ]
+        if not nodes:
+            raise HTTPException(status_code=400, detail={"error": "proxy group node url is required"})
+        results = [
+            {"node_id": str(node.get("id") or ""), "result": await run_in_threadpool(test_proxy, _clean_text(node.get("url")))}
+            for node in nodes
+        ]
+        return {
+            "results": results,
+            "result": results[0]["result"] if len(results) == 1 else None,
+            "groups": _config_dict_list("proxy_groups"),
+        }
 
     @router.get("/api/proxy/runtime")
     async def get_proxy_runtime_endpoint(authorization: str | None = Header(default=None)):
@@ -174,6 +746,37 @@ def create_router(app_version: str) -> APIRouter:
         return {
             "backend": storage.get_backend_info(),
             "health": storage.health_check(),
+        }
+
+    @router.get("/api/dashboard")
+    async def get_dashboard(
+        authorization: str | None = Header(default=None),
+        log_limit: int = Query(default=5000, ge=1, le=20000),
+        time_range: str = Query(default="24h", pattern="^(24h|7d|30d)$"),
+    ):
+        require_admin(authorization)
+        from services.account_service import account_service as acct_svc
+
+        account_stats = acct_svc.get_stats()
+        account_healthy = bool(account_stats.get("active")) or bool(account_stats.get("unlimited_quota_count"))
+        storage = config.get_storage_backend()
+        call_logs = log_service.list(type=LOG_TYPE_CALL, limit=log_limit)
+        image_storage_stats = await run_in_threadpool(storage_stats)
+        storage_health = await run_in_threadpool(storage.health_check)
+        return {
+            "status": "ok" if account_healthy else "degraded",
+            "healthy": account_healthy,
+            "version": app_version,
+            "accounts": {
+                **account_stats,
+                "healthy": account_healthy,
+            },
+            "storage": {
+                "backend": storage.get_backend_info(),
+                "health": storage_health,
+                "images": image_storage_stats,
+            },
+            "logs": _dashboard_log_summary(call_logs, time_range=time_range),
         }
 
     @router.post("/api/backup/test")

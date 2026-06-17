@@ -14,24 +14,24 @@
   "proxy": "",
   "proxy_runtime": {
     "enabled": false,
-    "egress_mode": "single_proxy",
-    "proxy_url": "http://privoxy:8118",
+    "egress_mode": "direct",
+    "proxy_url": "",
     "resource_proxy_url": "",
-    "skip_ssl_verify": true,
+    "skip_ssl_verify": false,
     "reset_session_status_codes": [
       403
     ],
     "clearance": {
-      "enabled": true,
-      "mode": "flaresolverr",
+      "enabled": false,
+      "mode": "none",
       "cf_cookies": "",
       "cf_clearance": "",
       "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
       "browser": "chrome",
-      "flaresolverr_url": "http://flaresolverr:8191",
+      "flaresolverr_url": "",
       "timeout_sec": 60,
       "refresh_interval": 3600,
-      "warm_up_on_start": true
+      "warm_up_on_start": false
     }
   },
   "base_url": "",
@@ -47,9 +47,9 @@
   "backup": {
     "enabled": false,
     "provider": "cloudflare_r2",
-    "account_id": "admin",
+    "account_id": "",
     "access_key_id": "",
-    "secret_access_key": "admin",
+    "secret_access_key": "",
     "bucket": "",
     "prefix": "backups",
     "interval_minutes": 1440,

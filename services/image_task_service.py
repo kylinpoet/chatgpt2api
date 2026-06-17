@@ -43,6 +43,14 @@ def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
 
 
+def _image_count(value: object) -> int:
+    try:
+        count = int(value or 1)
+    except (TypeError, ValueError):
+        count = 1
+    return min(4, max(1, count))
+
+
 def _owner_id(identity: dict[str, object]) -> str:
     return _clean(identity.get("id")) or "anonymous"
 
@@ -67,6 +75,7 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "status": task.get("status"),
         "mode": task.get("mode"),
         "model": task.get("model"),
+        "n": _image_count(task.get("n")),
         "size": task.get("size"),
         "quality": task.get("quality"),
         "created_at": task.get("created_at"),
@@ -126,14 +135,15 @@ class ImageTaskService:
         client_task_id: str,
         prompt: str,
         model: str,
-        size: str | None,
+        n: int = 1,
+        size: str | None = None,
         quality: str = "auto",
         base_url: str = "",
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
             "model": model,
-            "n": 1,
+            "n": _image_count(n),
             "size": size,
             "quality": quality,
             "response_format": "url",
@@ -148,7 +158,8 @@ class ImageTaskService:
         client_task_id: str,
         prompt: str,
         model: str,
-        size: str | None,
+        n: int = 1,
+        size: str | None = None,
         quality: str = "auto",
         base_url: str = "",
         images: list[tuple[bytes, str, str]] | None = None,
@@ -159,7 +170,7 @@ class ImageTaskService:
             "images": images or [],
             "mask": masks or [],
             "model": model,
-            "n": 1,
+            "n": _image_count(n),
             "size": size,
             "quality": quality,
             "response_format": "url",
@@ -219,6 +230,7 @@ class ImageTaskService:
                 "status": TASK_STATUS_QUEUED,
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
+                "n": _image_count(payload.get("n")),
                 "size": _clean(payload.get("size")),
                 "quality": _clean(payload.get("quality"), "auto"),
                 "created_at": now,
@@ -383,6 +395,7 @@ class ImageTaskService:
                 "status": status,
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
+                "n": _image_count(item.get("n")),
                 "size": _clean(item.get("size")),
                 "quality": _clean(item.get("quality"), "auto"),
                 "created_at": _clean(item.get("created_at"), _now_iso()),

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request
+from services.account_service import account_service
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
 
@@ -15,6 +16,7 @@ class ImageGenerationTaskRequest(BaseModel):
     client_task_id: str = Field(..., min_length=1)
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
+    n: int = Field(default=1, ge=1, le=4)
     size: str | None = None
     quality: str = "auto"
 
@@ -25,6 +27,22 @@ class ResumePollRequest(BaseModel):
 
 def _parse_task_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _image_quota_payload(stats: dict) -> dict[str, object]:
+    total_quota = max(0, int(stats.get("total_quota") or 0))
+    unlimited = max(0, int(stats.get("unlimited_quota_count") or 0))
+    unknown = max(0, int(stats.get("unknown_quota_count") or 0))
+    return {
+        "total_quota": total_quota,
+        "unlimited_quota_count": unlimited,
+        "unknown_quota_count": unknown,
+        "active_accounts": max(0, int(stats.get("active") or 0)),
+        "limited_accounts": max(0, int(stats.get("limited") or 0)),
+        "abnormal_accounts": max(0, int(stats.get("abnormal") or 0)),
+        "disabled_accounts": max(0, int(stats.get("disabled") or 0)),
+        "available": total_quota > 0 or unlimited > 0 or unknown > 0,
+    }
 
 
 async def filter_or_log(call: LoggedCall, text: str) -> None:
@@ -44,7 +62,19 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids))
+        tasks = await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids))
+        stats = await run_in_threadpool(account_service.get_stats)
+        if isinstance(tasks, dict):
+            return {**tasks, "quota_summary": _image_quota_payload(stats)}
+        return tasks
+
+    @router.get("/api/image-tasks/quota")
+    async def image_quota_summary(
+        authorization: str | None = Header(default=None),
+    ):
+        require_identity(authorization)
+        stats = await run_in_threadpool(account_service.get_stats)
+        return _image_quota_payload(stats)
 
     @router.post("/api/image-tasks/generations")
     async def create_generation_task(
@@ -61,6 +91,7 @@ def create_router() -> APIRouter:
                 client_task_id=body.client_task_id,
                 prompt=body.prompt,
                 model=body.model,
+                n=body.n,
                 size=body.size,
                 quality=body.quality,
                 base_url=resolve_image_base_url(request),
@@ -90,6 +121,7 @@ def create_router() -> APIRouter:
                 client_task_id=client_task_id,
                 prompt=prompt,
                 model=model,
+                n=payload.get("n", 1),
                 size=payload["size"],
                 quality=payload["quality"],
                 base_url=resolve_image_base_url(request),

@@ -6,9 +6,18 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+logs
+runtime
+standalone
+test
+tests
+docs/*.md
+scripts/test_*.py
 
-web/.next
-web/node_modules
+web
+web-vue/dist
+web-vue/node_modules
+web_dist
 
 assets
 README.md

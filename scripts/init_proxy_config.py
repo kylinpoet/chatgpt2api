@@ -51,6 +51,18 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
     try:
         return max(minimum, int(os.getenv(name, str(default))))
@@ -120,6 +132,22 @@ def _looks_like_repository_default(runtime: Any) -> bool:
     return candidate == DEFAULT_PROXY_RUNTIME
 
 
+def _looks_like_inactive_warp_scaffold(runtime: Any) -> bool:
+    if not isinstance(runtime, dict):
+        return False
+    clearance = runtime.get("clearance") if isinstance(runtime.get("clearance"), dict) else {}
+    return (
+        not _bool_value(runtime.get("enabled"), False)
+        and str(runtime.get("egress_mode") or "").strip().lower() == "single_proxy"
+        and str(runtime.get("proxy_url") or "").strip() == "http://privoxy:8118"
+        and _bool_value(clearance.get("enabled"), False)
+        and str(clearance.get("mode") or "").strip().lower() == "flaresolverr"
+        and str(clearance.get("flaresolverr_url") or "").strip() == "http://flaresolverr:8191"
+        and not str(clearance.get("cf_cookies") or "").strip()
+        and not str(clearance.get("cf_clearance") or "").strip()
+    )
+
+
 def _mask_url(value: str) -> str:
     return re.sub(r"(https?://)([^\s/@:]+):([^\s/@]+)@", r"\1[REDACTED]@", value or "", flags=re.I)
 
@@ -143,7 +171,11 @@ def main() -> int:
     existing = data.get("proxy_runtime")
     changed = False
 
-    if _looks_like_repository_default(existing) or _env_bool("CHATGPT2API_PROXY_RUNTIME_FORCE", False):
+    if (
+        _looks_like_repository_default(existing)
+        or _looks_like_inactive_warp_scaffold(existing)
+        or _env_bool("CHATGPT2API_PROXY_RUNTIME_FORCE", False)
+    ):
         data["proxy_runtime"] = desired
         changed = True
         print("Created proxy_runtime defaults")

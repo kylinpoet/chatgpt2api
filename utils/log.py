@@ -1,8 +1,11 @@
 import base64
 import binascii
+from collections import deque
+from datetime import datetime
 import json
 import logging
 import re
+from threading import Lock
 from typing import Any
 
 
@@ -18,6 +21,9 @@ class Logger:
             self._logger.addHandler(handler)
         self._logger.setLevel(logging.DEBUG)
         self._logger.propagate = False
+        self._records: deque[dict[str, Any]] = deque(maxlen=1000)
+        self._records_lock = Lock()
+        self._sequence = 0
 
     def _enabled(self, level: str) -> bool:
         try:
@@ -90,21 +96,47 @@ class Logger:
             return sanitized
         return json.dumps(sanitized, ensure_ascii=False, default=str)
 
+    def _record(self, level: str, message: str) -> None:
+        with self._records_lock:
+            self._sequence += 1
+            self._records.append(
+                {
+                    "id": f"runtime-{self._sequence}",
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "level": level,
+                    "message": message,
+                    "source": "memory",
+                }
+            )
+
+    def get_records(self, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit or 200), 1), 1000)
+        with self._records_lock:
+            return list(reversed(list(self._records)))[:safe_limit]
+
     def debug(self, message: Any) -> None:
         if self._enabled("debug"):
-            self._logger.debug(self._message(message))
+            formatted = self._message(message)
+            self._record("debug", formatted)
+            self._logger.debug(formatted)
 
     def info(self, message: Any) -> None:
         if self._enabled("info"):
-            self._logger.info(self._message(message))
+            formatted = self._message(message)
+            self._record("info", formatted)
+            self._logger.info(formatted)
 
     def warning(self, message: Any) -> None:
         if self._enabled("warning"):
-            self._logger.warning(self._message(message))
+            formatted = self._message(message)
+            self._record("warning", formatted)
+            self._logger.warning(formatted)
 
     def error(self, message: Any) -> None:
         if self._enabled("error"):
-            self._logger.error(self._message(message))
+            formatted = self._message(message)
+            self._record("error", formatted)
+            self._logger.error(formatted)
 
 
 logger = Logger()

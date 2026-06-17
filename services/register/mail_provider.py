@@ -26,8 +26,8 @@ OUTLOOK_TOKEN_USED_FILE = DATA_DIR / "outlook_token_used.json"
 _outlook_token_state_lock = Lock()
 # in_use 超过该秒数视为陈旧（注册进程崩溃残留），可被重新领用
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
-OUTLOOK_RECORDED_STATES = {"used", "in_use", "token_invalid", "failed"}
-OUTLOOK_UNAVAILABLE_STATES = {"used", "token_invalid", "failed"}
+OUTLOOK_RECORDED_STATES = {"used", "in_use", "login_required", "token_invalid", "failed"}
+OUTLOOK_UNAVAILABLE_STATES = {"used", "login_required", "token_invalid", "failed"}
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -156,7 +156,7 @@ def reset_outlook_token_pool_state(scope: str = "all") -> int:
         if not store:
             return 0
         if str(scope) == "failed":
-            remove = {key for key, value in store.items() if str(value.get("state") or "") in {"failed", "token_invalid", "in_use"}}
+            remove = {key for key, value in store.items() if str(value.get("state") or "") in {"failed", "login_required", "token_invalid", "in_use"}}
             for key in remove:
                 store.pop(key, None)
             _save_outlook_token_state(store)
@@ -186,7 +186,7 @@ def prune_outlook_unused_credentials(credentials: list[dict[str, str]]) -> tuple
 def outlook_token_pool_stats(pool: list[dict[str, str]] | None = None) -> dict[str, int]:
     """统计邮箱池各状态数量。pool 为该 provider 当前导入的邮箱列表（用于算 unused）。"""
     store = _load_outlook_token_state()
-    counts = {"unused": 0, "in_use": 0, "used": 0, "token_invalid": 0, "failed": 0}
+    counts = {"unused": 0, "in_use": 0, "used": 0, "login_required": 0, "token_invalid": 0, "failed": 0}
     if pool:
         for credential in pool:
             entry = store.get(str(credential.get("email") or "").strip().lower())
@@ -329,7 +329,18 @@ def _extract_text_candidates(value: Any) -> list[str]:
 def _message_matches_email(data: dict[str, Any], email: str) -> bool:
     target = str(email or "").strip().lower()
     candidates: list[str] = []
-    for key in ("to", "mailTo", "receiver", "receivers", "address", "email", "envelope_to"):
+    for key in (
+        "to",
+        "mailTo",
+        "receiver",
+        "receivers",
+        "address",
+        "email",
+        "envelope_to",
+        "delivered_to",
+        "x_forwarded_to",
+        "x_original_to",
+    ):
         if key in data:
             candidates.extend(_extract_text_candidates(data.get(key)))
     return not target or not candidates or any(target in str(item).strip().lower() for item in candidates if str(item).strip())
@@ -1067,6 +1078,14 @@ OUTLOOK_IMAP_SCOPE = "offline_access https://outlook.office.com/IMAP.AccessAsUse
 OUTLOOK_DEFAULT_IMAP_HOST = "outlook.office365.com"
 
 
+def _is_outlook_scope_denied(error: Exception | str) -> bool:
+    text = str(error or "").lower()
+    return (
+        "aadsts70000" in text
+        or ("scope" in text and ("unauthorized" in text or "expired" in text or "grant" in text))
+    )
+
+
 class OutlookTokenError(RuntimeError):
     """refresh_token 换取 access_token 失败（凭据失效/权限不对），与“读邮件失败”区分。"""
 
@@ -1130,9 +1149,9 @@ class OutlookTokenProvider(BaseMailProvider):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.label = str(entry.get("label") or self.provider_ref)
         self.pool = _normalize_outlook_pool(entry.get("mailboxes") or entry.get("pool"))
-        self.mode = str(entry.get("mode") or "graph").strip().lower() or "graph"
+        self.mode = str(entry.get("mode") or "auto").strip().lower() or "auto"
         if self.mode not in {"graph", "imap", "auto"}:
-            self.mode = "graph"
+            self.mode = "auto"
         self.imap_host = str(entry.get("imap_host") or OUTLOOK_DEFAULT_IMAP_HOST).strip() or OUTLOOK_DEFAULT_IMAP_HOST
         self.message_limit = max(1, int(entry.get("message_limit") or 10))
         self.session = _create_session(conf)
@@ -1188,6 +1207,7 @@ class OutlookTokenProvider(BaseMailProvider):
             "provider_ref": self.provider_ref,
             "address": credential["email"],
             "label": self.label,
+            "password": credential.get("password", ""),
             "client_id": credential["client_id"],
             "refresh_token": credential["refresh_token"],
         }
@@ -1196,7 +1216,7 @@ class OutlookTokenProvider(BaseMailProvider):
         resp = self.session.get(
             OUTLOOK_GRAPH_MESSAGES_URL,
             headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "User-Agent": self.conf["user_agent"]},
-            params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "subject,receivedDateTime,from,body,bodyPreview"},
+            params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "subject,receivedDateTime,from,toRecipients,ccRecipients,body,bodyPreview"},
             timeout=self.conf["request_timeout"],
             verify=False,
         )
@@ -1219,6 +1239,20 @@ class OutlookTokenProvider(BaseMailProvider):
                 return str(address.get("address") or address.get("name") or "")
         return ""
 
+    @staticmethod
+    def _graph_recipients(message: dict[str, Any]) -> list[str]:
+        recipients: list[str] = []
+        for key in ("toRecipients", "ccRecipients"):
+            values = message.get(key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                address = item.get("emailAddress") if isinstance(item, dict) and isinstance(item.get("emailAddress"), dict) else {}
+                value = str(address.get("address") or address.get("name") or "").strip()
+                if value:
+                    recipients.append(value)
+        return recipients
+
     def _normalize_graph_item(self, mailbox: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
         body = item.get("body") if isinstance(item.get("body"), dict) else {}
         content_type = str(body.get("contentType") or "").lower()
@@ -1231,6 +1265,7 @@ class OutlookTokenProvider(BaseMailProvider):
             "message_id": str(item.get("id") or ""),
             "subject": str(item.get("subject") or ""),
             "sender": self._graph_sender(item),
+            "to": self._graph_recipients(item),
             "text_content": text_content,
             "html_content": html_content,
             "received_at": _parse_received_at(item.get("receivedDateTime")),
@@ -1256,12 +1291,27 @@ class OutlookTokenProvider(BaseMailProvider):
             uids = data[0].split()[-self.message_limit :]
             messages: list[dict[str, Any]] = []
             for uid in reversed(uids):  # 最新在前
-                status, fetched = imap.uid("fetch", uid, "(RFC822)")
+                status, fetched = imap.uid("fetch", uid, "(INTERNALDATE RFC822)")
                 if status != "OK":
                     continue
-                raw_payload = next((part[1] for part in fetched if isinstance(part, tuple) and isinstance(part[1], bytes)), b"")
+                raw_payload = b""
+                internal_received = None
+                for part in fetched:
+                    if not (isinstance(part, tuple) and isinstance(part[1], bytes)):
+                        continue
+                    meta = part[0].decode("utf-8", "replace") if isinstance(part[0], bytes) else str(part[0])
+                    match = re.search(r'INTERNALDATE "([^"]+)"', meta)
+                    if match:
+                        try:
+                            parsed = imaplib.Internaldate2tuple(b'INTERNALDATE "' + match.group(1).encode() + b'"')
+                            if parsed:
+                                internal_received = datetime.fromtimestamp(time.mktime(parsed), tz=timezone.utc)
+                        except Exception:
+                            internal_received = None
+                    raw_payload = part[1]
+                    break
                 if raw_payload:
-                    messages.append(self._parse_imap_message(mailbox, raw_payload))
+                    messages.append(self._parse_imap_message(mailbox, raw_payload, internal_received))
             return messages
         finally:
             try:
@@ -1269,12 +1319,12 @@ class OutlookTokenProvider(BaseMailProvider):
             except Exception:
                 pass
 
-    def _parse_imap_message(self, mailbox: dict[str, Any], raw: bytes) -> dict[str, Any]:
+    def _parse_imap_message(self, mailbox: dict[str, Any], raw: bytes, internal_received: datetime | None = None) -> dict[str, Any]:
         message = message_from_bytes(raw, policy=policy.default)
         try:
-            received = _parse_received_at(parsedate_to_datetime(str(message.get("Date") or "")))
+            received = internal_received or _parse_received_at(parsedate_to_datetime(str(message.get("Date") or "")))
         except Exception:
-            received = None
+            received = internal_received
         plain: list[str] = []
         html: list[str] = []
         for part in (message.walk() if message.is_multipart() else [message]):
@@ -1305,6 +1355,10 @@ class OutlookTokenProvider(BaseMailProvider):
             "message_id": _decode(str(message.get("Message-ID") or "")),
             "subject": _decode(str(message.get("Subject") or "")),
             "sender": _decode(str(message.get("From") or "")),
+            "to": _decode(str(message.get("To") or "")),
+            "delivered_to": _decode(str(message.get("Delivered-To") or "")),
+            "x_forwarded_to": _decode(str(message.get("X-Forwarded-To") or "")),
+            "x_original_to": _decode(str(message.get("X-Original-To") or "")),
             "text_content": "\n".join(plain).strip(),
             "html_content": "\n".join(html).strip(),
             "received_at": received,
@@ -1318,15 +1372,20 @@ class OutlookTokenProvider(BaseMailProvider):
         if not client_id or not refresh_token:
             raise RuntimeError("OutlookToken mailbox 缺少 client_id 或 refresh_token")
         errors: list[str] = []
+        graph_error: Exception | None = None
         if self.mode in {"graph", "auto"}:
             try:
                 access_token = self._access_token(mailbox, client_id, refresh_token, OUTLOOK_GRAPH_SCOPE)
                 return self._graph_messages(mailbox, access_token)
             except Exception as error:
-                if self.mode == "graph":
+                graph_error = error
+                if self.mode == "graph" and not _is_outlook_scope_denied(error):
                     raise
                 errors.append(f"graph: {error}")
-        if self.mode in {"imap", "auto"}:
+        should_try_imap = self.mode in {"imap", "auto"} or (
+            self.mode == "graph" and graph_error is not None and _is_outlook_scope_denied(graph_error)
+        )
+        if should_try_imap:
             try:
                 access_token = self._access_token(mailbox, client_id, refresh_token, OUTLOOK_IMAP_SCOPE)
                 return self._imap_messages(mailbox, access_token)
@@ -1334,6 +1393,8 @@ class OutlookTokenProvider(BaseMailProvider):
                 if self.mode == "imap":
                     raise
                 errors.append(f"imap: {error}")
+                if self.mode == "graph":
+                    raise RuntimeError("; ".join(errors)) from error
         if errors:
             raise RuntimeError("; ".join(errors))
         return []
@@ -1351,8 +1412,23 @@ class OutlookTokenProvider(BaseMailProvider):
         seen_refs = {str(item) for item in seen_value}
 
         deadline = time.monotonic() + self.conf["wait_timeout"]
+        target_address = str(mailbox.get("address") or "").strip()
         while time.monotonic() < deadline:
             for message in self.fetch_recent_messages(mailbox):
+                if target_address and not _message_matches_email(message, target_address):
+                    continue
+                received_after = mailbox.get("_received_after")
+                received_at = message.get("received_at")
+                if received_after and received_at:
+                    try:
+                        threshold = datetime.fromisoformat(str(received_after))
+                        if threshold.tzinfo is None:
+                            threshold = threshold.replace(tzinfo=timezone.utc)
+                        current = received_at if received_at.tzinfo else received_at.replace(tzinfo=timezone.utc)
+                        if current < threshold:
+                            continue
+                    except Exception:
+                        pass
                 ref = _message_tracking_ref(message)
                 if ref in seen_refs:
                     continue
@@ -1470,6 +1546,8 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     reason = str(error or "").strip()
     if isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
         _set_outlook_token_state(address, "token_invalid", reason[:300])
+    elif "登录流" in reason or "login flow" in reason or "login_required" in reason:
+        _set_outlook_token_state(address, "login_required", reason[:300])
     else:
         _set_outlook_token_state(address, "failed", reason[:300])
 

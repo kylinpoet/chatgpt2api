@@ -83,10 +83,7 @@ services:
       start_period: 30s
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: chatgpt2api:warp
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/yukkcat/chatgpt2api:latest}
     container_name: chatgpt2api-warp
     restart: unless-stopped
     depends_on:
@@ -104,5 +101,9 @@ services:
     environment:
       STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
       DATABASE_URL: ${DATABASE_URL:-}
+      GIT_REPO_URL: ${GIT_REPO_URL:-}
+      GIT_TOKEN: ${GIT_TOKEN:-}
+      GIT_BRANCH: ${GIT_BRANCH:-main}
+      GIT_FILE_PATH: ${GIT_FILE_PATH:-accounts.json}
       CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
       CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}

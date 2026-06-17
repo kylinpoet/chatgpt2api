@@ -10,7 +10,7 @@ web_dist
 .venv
 .idea
 data
-config.json
+config.local*.json
 edit
 
 docker-compose-local.yml
@@ -30,6 +30,19 @@ docker-compose-local.yml
 git_cache/
 
 # 调试/测试输出目录
+.codex/run-logs/
+.playwright-mcp/
+logs/
+runtime/
 loginwithpassword_*/
 logwithemailverifycode_*/
 test_batch_output/
+
+# 本地实验/生成物
+skills/
+standalone/
+test/
+tests/
+docs/*.md
+scripts/test_*.py
+web/
