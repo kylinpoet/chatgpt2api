@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +13,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 from services.config import DATA_DIR, config
+from services.json_file import read_json_object, write_json_file
 from utils.timezone import beijing_datetime_from_timestamp, beijing_now, beijing_now_str
 
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
@@ -87,20 +87,12 @@ def _local_image_path(relative_path: str) -> Path:
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json_object(path, name=path.name)
     return data if isinstance(data, dict) else {}
 
 
 def _write_json_object(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    write_json_file(path, data)
 
 
 class WebDAVClient:

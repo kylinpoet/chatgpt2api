@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-import json
 import os
-import sys
+import threading
 from pathlib import Path
 import time
 
+from services.json_file import read_json_object, write_json_file
 from services.storage.base import StorageBackend
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -301,6 +301,34 @@ def _normalize_third_party_apps_settings(value: object) -> dict[str, object]:
     }
 
 
+def _legacy_basic_from_settings(value: object, settings: dict[str, object]) -> dict[str, object]:
+    source = dict(value) if isinstance(value, dict) else {}
+    source["proxy"] = str(settings.get("proxy") or "").strip()
+    source["base_url"] = str(settings.get("base_url") or "").strip().rstrip("/")
+    try:
+        source["image_expire_hours"] = max(
+            1,
+            int(settings.get("image_retention_days", source.get("image_expire_hours", 30)) or 30),
+        )
+    except (TypeError, ValueError):
+        source["image_expire_hours"] = 30
+    return source
+
+
+def _promote_legacy_basic_settings(data: dict[str, object]) -> dict[str, object]:
+    next_data = dict(data or {})
+    basic = next_data.get("basic")
+    if not isinstance(basic, dict):
+        return next_data
+    if "proxy" not in next_data and "proxy" in basic:
+        next_data["proxy"] = str(basic.get("proxy") or "").strip()
+    if "base_url" not in next_data and "base_url" in basic:
+        next_data["base_url"] = str(basic.get("base_url") or "").strip().rstrip("/")
+    if "image_retention_days" not in next_data and "image_expire_hours" in basic:
+        next_data["image_retention_days"] = basic.get("image_expire_hours")
+    return next_data
+
+
 def _validate_image_storage_settings(settings: dict[str, object]) -> None:
     if not _normalize_bool(settings.get("enabled"), False):
         return
@@ -324,25 +352,9 @@ def _is_invalid_auth_key(value: object) -> bool:
     return _normalize_auth_key(value) == ""
 
 
-def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    if path.is_dir():
-        print(
-            f"Warning: {name} at '{path}' is a directory, ignoring it and falling back to other configuration sources.",
-            file=sys.stderr,
-        )
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _load_settings() -> LoadedSettings:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    raw_config = _read_json_object(CONFIG_FILE, name="config.json")
+    raw_config = read_json_object(CONFIG_FILE, name="config.json")
     auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key"))
     if _is_invalid_auth_key(auth_key):
         raise ValueError(
@@ -364,8 +376,9 @@ def _load_settings() -> LoadedSettings:
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
+        self._lock = threading.RLock()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.data = self._load()
+        self.data = _promote_legacy_basic_settings(self._load())
         self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
@@ -378,10 +391,10 @@ class ConfigStore:
             )
 
     def _load(self) -> dict[str, object]:
-        return _read_json_object(self.path, name="config.json")
+        return read_json_object(self.path, name="config.json")
 
     def _save(self) -> None:
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_file(self.path, self.data)
 
     @property
     def auth_key(self) -> str:
@@ -576,31 +589,33 @@ class ConfigStore:
         return value or "0.0.0"
 
     def get(self) -> dict[str, object]:
-        data = dict(self.data)
-        data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
-        data["image_retention_days"] = self.image_retention_days
-        data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
-        data["image_stream_timeout_secs"] = self.image_stream_timeout_secs
-        data["image_poll_interval_secs"] = self.image_poll_interval_secs
-        data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
-        data["image_account_concurrency"] = self.image_account_concurrency
-        data["image_parallel_generation"] = self.image_parallel_generation
-        data["image_error_friendly_enabled"] = self.image_error_friendly_enabled
-        data["image_error_messages"] = self.get_image_error_messages()
-        data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
-        data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
-        data["auto_relogin_after_refresh"] = self.auto_relogin_after_refresh
-        data["log_levels"] = self.log_levels
-        data["sensitive_words"] = self.sensitive_words
-        data["ai_review"] = self.ai_review
-        data["global_system_prompt"] = self.global_system_prompt
-        data["backup"] = self.get_backup_settings()
-        data["image_storage"] = self.get_image_storage_settings()
-        data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
-        data["proxy_runtime"] = self.get_public_proxy_runtime_settings()
-        data["third_party_apps"] = self.get_third_party_apps_settings()
-        data.pop("auth-key", None)
-        return data
+        with self._lock:
+            data = dict(self.data)
+            data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
+            data["image_retention_days"] = self.image_retention_days
+            data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
+            data["image_stream_timeout_secs"] = self.image_stream_timeout_secs
+            data["image_poll_interval_secs"] = self.image_poll_interval_secs
+            data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
+            data["image_account_concurrency"] = self.image_account_concurrency
+            data["image_parallel_generation"] = self.image_parallel_generation
+            data["image_error_friendly_enabled"] = self.image_error_friendly_enabled
+            data["image_error_messages"] = self.get_image_error_messages()
+            data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
+            data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
+            data["auto_relogin_after_refresh"] = self.auto_relogin_after_refresh
+            data["log_levels"] = self.log_levels
+            data["sensitive_words"] = self.sensitive_words
+            data["ai_review"] = self.ai_review
+            data["global_system_prompt"] = self.global_system_prompt
+            data["backup"] = self.get_backup_settings()
+            data["image_storage"] = self.get_image_storage_settings()
+            data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
+            data["proxy_runtime"] = self.get_public_proxy_runtime_settings()
+            data["third_party_apps"] = self.get_third_party_apps_settings()
+            data["basic"] = _legacy_basic_from_settings(data.get("basic"), data)
+            data.pop("auth-key", None)
+            return data
 
     def get_proxy_settings(self) -> str:
         return str(self.data.get("proxy") or "").strip()
@@ -624,31 +639,34 @@ class ConfigStore:
         return _normalize_third_party_apps_settings(self.data.get("third_party_apps"))
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
-        next_data = dict(self.data)
-        next_data.update(dict(data or {}))
-        if "backup" in next_data:
-            next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
-        if "image_storage" in next_data:
-            next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
-            _validate_image_storage_settings(next_data["image_storage"])
-        if "chat_completion_cache" in next_data:
-            next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
-                next_data.get("chat_completion_cache")
-            )
-        if "third_party_apps" in next_data:
-            next_data["third_party_apps"] = _normalize_third_party_apps_settings(next_data.get("third_party_apps"))
-        if "proxy_runtime" in next_data:
-            incoming_runtime = next_data.get("proxy_runtime")
-            if isinstance(incoming_runtime, dict):
-                previous_clearance = self.get_proxy_runtime_settings().get("clearance")
-                if isinstance(previous_clearance, dict):
-                    incoming_runtime = dict(incoming_runtime)
-                    incoming_runtime["_existing_cf_cookies"] = previous_clearance.get("cf_cookies")
-                    incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
-            next_data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
-        next_data.pop("backup_state", None)
-        self.data = next_data
-        self._save()
+        with self._lock:
+            next_data = _promote_legacy_basic_settings(self.data)
+            next_data.update(_promote_legacy_basic_settings(dict(data or {})))
+            next_data = _promote_legacy_basic_settings(next_data)
+            if "backup" in next_data:
+                next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
+            if "image_storage" in next_data:
+                next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
+                _validate_image_storage_settings(next_data["image_storage"])
+            if "chat_completion_cache" in next_data:
+                next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
+                    next_data.get("chat_completion_cache")
+                )
+            if "third_party_apps" in next_data:
+                next_data["third_party_apps"] = _normalize_third_party_apps_settings(next_data.get("third_party_apps"))
+            if "proxy_runtime" in next_data:
+                incoming_runtime = next_data.get("proxy_runtime")
+                if isinstance(incoming_runtime, dict):
+                    previous_clearance = self.get_proxy_runtime_settings().get("clearance")
+                    if isinstance(previous_clearance, dict):
+                        incoming_runtime = dict(incoming_runtime)
+                        incoming_runtime["_existing_cf_cookies"] = previous_clearance.get("cf_cookies")
+                        incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
+                next_data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
+            next_data["basic"] = _legacy_basic_from_settings(next_data.get("basic"), next_data)
+            next_data.pop("backup_state", None)
+            self.data = next_data
+            self._save()
         return self.get()
 
     def get_backup_settings(self) -> dict[str, object]:
@@ -669,12 +687,12 @@ class ConfigStore:
 
 
 def load_backup_state() -> dict[str, object]:
-    return _normalize_backup_state(_read_json_object(BACKUP_STATE_FILE, name="backup_state.json"))
+    return _normalize_backup_state(read_json_object(BACKUP_STATE_FILE, name="backup_state.json"))
 
 
 def save_backup_state(state: dict[str, object]) -> dict[str, object]:
     normalized = _normalize_backup_state(state)
-    BACKUP_STATE_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_file(BACKUP_STATE_FILE, normalized)
     return normalized
 
 

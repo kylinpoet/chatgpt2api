@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import imaplib
-import json
 import random
 import re
 import string
@@ -18,6 +17,7 @@ from curl_cffi import requests
 
 
 from services.config import DATA_DIR
+from services.json_file import read_json_file, write_json_file
 from services.proxy_service import proxy_settings
 
 DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
@@ -32,19 +32,17 @@ OUTLOOK_UNAVAILABLE_STATES = {"used", "login_required", "token_invalid", "failed
 
 
 def _load_ddg_aliases() -> set[str]:
-    try:
-        if DDG_ALIASES_FILE.exists():
-            data = json.loads(DDG_ALIASES_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return {str(item).strip().lower() for item in data if str(item).strip()}
-    except Exception:
-        pass
-    return set()
+    data = read_json_file(
+        DDG_ALIASES_FILE,
+        name="ddg_aliases.json",
+        default_factory=list,
+        expected_types=list,
+    )
+    return {str(item).strip().lower() for item in data if str(item).strip()} if isinstance(data, list) else set()
 
 
 def _save_ddg_aliases(aliases: set[str]) -> None:
-    DDG_ALIASES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DDG_ALIASES_FILE.write_text(json.dumps(sorted(aliases), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_file(DDG_ALIASES_FILE, sorted(aliases))
 
 
 def _is_ddg_alias_duplicate(address: str) -> bool:
@@ -71,12 +69,12 @@ def _load_outlook_token_state() -> dict[str, dict[str, Any]]:
 
     兼容旧格式：纯字符串列表（历史的“已用邮箱”）会被解释为 used。
     """
-    try:
-        if not OUTLOOK_TOKEN_USED_FILE.exists():
-            return {}
-        data = json.loads(OUTLOOK_TOKEN_USED_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json_file(
+        OUTLOOK_TOKEN_USED_FILE,
+        name="outlook_token_used.json",
+        default_factory=dict,
+        expected_types=(dict, list),
+    )
     state: dict[str, dict[str, Any]] = {}
     if isinstance(data, list):
         for item in data:
@@ -102,7 +100,7 @@ def _load_outlook_token_state() -> dict[str, dict[str, Any]]:
 def _save_outlook_token_state(state: dict[str, dict[str, Any]]) -> None:
     OUTLOOK_TOKEN_USED_FILE.parent.mkdir(parents=True, exist_ok=True)
     ordered = {key: state[key] for key in sorted(state)}
-    OUTLOOK_TOKEN_USED_FILE.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_file(OUTLOOK_TOKEN_USED_FILE, ordered)
 
 
 def _outlook_entry_available(entry: dict[str, Any] | None) -> bool:
@@ -1767,7 +1765,9 @@ def _entries(mail_config: dict) -> list[dict]:
         cnt = counters.get(t, 0) + 1
         counters[t] = cnt
         label = f"DDG-{cnt}" if t == "ddg_mail" else f"{t}#{idx}"
-        result.append({**item, "provider_ref": f"{item['type']}#{idx}", "label": label})
+        stable_id = str(item.get("id") or item.get("provider_id") or "").strip()
+        provider_ref = f"{item['type']}:{stable_id}" if stable_id else f"{item['type']}#{idx}"
+        result.append({**item, "provider_ref": provider_ref, "label": label})
     return result
 
 

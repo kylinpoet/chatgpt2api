@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any
 from git import Repo
 from git.exc import GitCommandError
 
+from services.json_file import read_json_file, write_json_file
 from services.storage.base import StorageBackend
 
 
@@ -126,16 +126,12 @@ class GitStorageBackend(StorageBackend):
         file_full_path = Path(repo.working_dir) / file_path
         if not file_full_path.exists():
             return None
-        return json.loads(file_full_path.read_text(encoding="utf-8"))
+        return read_json_file(file_full_path, name=file_path, default_factory=lambda: None)
 
     def _save_json_file(self, file_path: str, items: Any, message: str) -> None:
         repo = self._clone_or_pull()
         file_full_path = Path(repo.working_dir) / file_path
-        file_full_path.parent.mkdir(parents=True, exist_ok=True)
-        file_full_path.write_text(
-            json.dumps(items, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_file(file_full_path, items, backup=False)
         repo.index.add([file_path])
         if repo.is_dirty():
             repo.index.commit(message)

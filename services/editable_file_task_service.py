@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import threading
 import time
 from pathlib import Path
@@ -10,6 +9,7 @@ from urllib.parse import quote
 from services.account_service import account_service
 from services.config import DATA_DIR
 from services.content_filter import request_text
+from services.json_file import read_json_file, write_json_file
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
 from utils.helper import new_uuid
@@ -168,12 +168,12 @@ class EditableFileTaskService:
             self._save_locked()
 
     def _load_locked(self) -> dict[str, dict[str, Any]]:
-        if not self.path.exists():
-            return {}
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        raw = read_json_file(
+            self.path,
+            name=self.path.name,
+            default_factory=dict,
+            expected_types=(dict, list),
+        )
         tasks: dict[str, dict[str, Any]] = {}
         for item in (raw.get("tasks") if isinstance(raw, dict) else raw) or []:
             if not isinstance(item, dict):
@@ -200,9 +200,7 @@ class EditableFileTaskService:
 
     def _save_locked(self) -> None:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(self.path)
+        write_json_file(self.path, {"tasks": items})
 
     def _recover_unfinished_locked(self) -> bool:
         changed = False

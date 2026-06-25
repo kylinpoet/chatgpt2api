@@ -38,6 +38,42 @@ class SettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+SETTINGS_UPDATE_KEYS = {
+    "proxy",
+    "proxy_runtime",
+    "base_url",
+    "refresh_account_interval_minute",
+    "image_retention_days",
+    "image_poll_timeout_secs",
+    "image_stream_timeout_secs",
+    "image_poll_interval_secs",
+    "image_poll_initial_wait_secs",
+    "image_account_concurrency",
+    "image_parallel_generation",
+    "image_error_friendly_enabled",
+    "image_error_messages",
+    "image_settle_enabled",
+    "image_check_before_hit_enabled",
+    "image_settle_secs",
+    "image_timeout_retry_secs",
+    "auto_remove_invalid_accounts",
+    "auto_remove_rate_limited_accounts",
+    "auto_relogin_after_refresh",
+    "log_levels",
+    "global_system_prompt",
+    "sensitive_words",
+    "ai_review",
+    "public_display",
+    "image_generation",
+    "quota_limits",
+    "runtime_capacity",
+    "image_storage",
+    "backup",
+    "chat_completion_cache",
+    "third_party_apps",
+}
+
+
 class ProxyTestRequest(BaseModel):
     url: str = ""
 
@@ -545,7 +581,11 @@ def create_router(app_version: str) -> APIRouter:
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            return {"config": config.update(body.model_dump(mode="python"))}
+            incoming = body.model_dump(mode="python")
+            updates = {key: value for key, value in incoming.items() if key in SETTINGS_UPDATE_KEYS}
+            if not updates:
+                return {"config": config.get()}
+            return {"config": config.update(updates)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

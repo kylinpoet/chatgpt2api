@@ -778,7 +778,7 @@ const outlookPoolActionItems: ActionMenuItem[] = [
   { key: 'unused', label: '删除未使用材料', danger: true, dividerBefore: true },
   { key: 'all', label: '重置邮箱池状态', danger: true },
 ]
-const providerCommonKeys = ['enable', 'type', 'label'] as const
+const providerCommonKeys = ['id', 'enable', 'type', 'label'] as const
 const providerTypeKeys: Record<string, string[]> = {
   cloudmail_gen: ['api_base', 'admin_email', 'admin_password', 'domain', 'subdomain', 'email_prefix'],
   cloudflare_temp_email: ['api_base', 'admin_password', 'domain'],
@@ -881,6 +881,7 @@ function normalizeProvider(provider: RegisterProvider): RegisterProvider {
   const normalized = {
     ...defaultProvider(type),
     ...provider,
+    id: String(provider.id || provider.provider_id || '').trim() || createProviderId(type),
     type,
     enable: provider.enable !== false,
   }
@@ -891,7 +892,7 @@ function normalizeProvider(provider: RegisterProvider): RegisterProvider {
 }
 
 function defaultProvider(type = 'cloudmail_gen'): RegisterProvider {
-  const base = { enable: true, type }
+  const base = { id: createProviderId(type), enable: true, type }
   switch (type) {
     case 'cloudmail_gen':
       return { ...base, api_base: '', admin_email: '', admin_password: '', domain: [], subdomain: [], email_prefix: '' }
@@ -938,8 +939,15 @@ function providerType(provider: RegisterProvider) {
   return String(provider.type || 'cloudmail_gen')
 }
 
+function createProviderId(type = 'provider') {
+  const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+    : Math.random().toString(36).slice(2, 14).padEnd(12, '0')
+  return `${type}-${suffix}`
+}
+
 function providerKey(provider: RegisterProvider, index: number) {
-  return `${providerType(provider)}-${index}`
+  return String(provider.id || provider.provider_id || '').trim() || `${providerType(provider)}-${index}`
 }
 
 function providerTitle(provider: RegisterProvider, index: number) {
@@ -984,6 +992,7 @@ function providerWithTypeDraft(current: RegisterProvider, type: string): Registe
   const next: RegisterProvider = {
     ...current,
     ...defaults,
+    id: String(current.id || current.provider_id || defaults.id || '').trim(),
     type,
     enable: current.enable !== false,
   }
@@ -1537,7 +1546,7 @@ function updateProviderArray(index: number, key: 'domain' | 'subdomain', event: 
 
 function sanitizeProvider(provider: RegisterProvider): RegisterProvider {
   const type = providerType(provider)
-  const output: RegisterProvider = {}
+  const output: RegisterProvider = providerHasKnownType(type) ? {} : { ...provider }
 
   if (providerHasKnownType(type)) {
     for (const key of providerKeysForType(type)) {
@@ -1545,8 +1554,6 @@ function sanitizeProvider(provider: RegisterProvider): RegisterProvider {
         output[key] = providerDraftValue(type, key, provider[key])
       }
     }
-  } else {
-    Object.assign(output, provider)
   }
 
   delete output.mailboxes_count

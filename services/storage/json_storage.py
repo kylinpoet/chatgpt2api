@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from services.json_file import read_json_file, write_json_file
 from services.storage.base import StorageBackend
 
 
@@ -18,21 +18,17 @@ class JSONStorageBackend(StorageBackend):
 
     @staticmethod
     def _load_json_list(file_path: Path) -> list[dict[str, Any]]:
-        if not file_path.exists():
-            return []
-        try:
-            data = json.loads(file_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, Exception):
-            return []
+        data = read_json_file(
+            file_path,
+            name=file_path.name,
+            default_factory=list,
+            expected_types=list,
+        )
+        return data if isinstance(data, list) else []
 
     @staticmethod
     def _save_json_list(file_path: Path, items: list[dict[str, Any]]) -> None:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(
-            json.dumps(items, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_file(file_path, items)
 
     def load_accounts(self) -> list[dict[str, Any]]:
         """从 JSON 文件加载账号数据"""
@@ -44,23 +40,19 @@ class JSONStorageBackend(StorageBackend):
 
     def load_auth_keys(self) -> list[dict[str, Any]]:
         """从 JSON 文件加载鉴权密钥数据"""
-        if not self.auth_keys_path.exists():
-            return []
-        try:
-            data = json.loads(self.auth_keys_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, Exception):
-            return []
+        data = read_json_file(
+            self.auth_keys_path,
+            name="auth_keys.json",
+            default_factory=list,
+            expected_types=(dict, list),
+        )
         if isinstance(data, dict):
             data = data.get("items")
         return data if isinstance(data, list) else []
 
     def save_auth_keys(self, auth_keys: list[dict[str, Any]]) -> None:
         """保存鉴权密钥数据到 JSON 文件"""
-        self.auth_keys_path.parent.mkdir(parents=True, exist_ok=True)
-        self.auth_keys_path.write_text(
-            json.dumps({"items": auth_keys}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_file(self.auth_keys_path, {"items": auth_keys})
 
     def health_check(self) -> dict[str, Any]:
         """健康检查"""

@@ -12,7 +12,7 @@
     "info",
     "warning"
   ],
-  "proxy": "",
+  "proxy": "http://127.0.0.1:7890",
   "proxy_runtime": {
     "enabled": false,
     "egress_mode": "direct",
@@ -95,7 +95,7 @@
   },
   "image_settle_enabled": false,
   "image_check_before_hit_enabled": false,
-  "image_settle_secs": 5,
+  "image_settle_secs": 2,
   "auto_relogin_after_refresh": false,
   "image_timeout_retry_secs": 30,
   "third_party_apps": {
@@ -107,7 +107,7 @@
   "basic": {
     "api_key": "",
     "base_url": "",
-    "proxy": "",
+    "proxy": "http://127.0.0.1:7890",
     "image_expire_hours": 15
   },
   "public_display": {
@@ -141,7 +141,7 @@
     "request_queue_timeout_seconds": 2
   },
   "proxy_profiles": [],
-  "image_error_friendly_enabled": false,
+  "image_error_friendly_enabled": true,
   "image_error_messages": {
     "fallback": "图片生成请求失败，请稍后重试。",
     "quota": "当前可用图片额度不足，请稍后再试或联系管理员。",

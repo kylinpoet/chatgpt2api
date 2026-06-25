@@ -10,6 +10,7 @@ from pathlib import Path
 
 from services.account_service import account_service
 from services.config import DATA_DIR
+from services.json_file import read_json_object, write_json_file
 from services.register import mail_provider, openai_register
 
 
@@ -34,6 +35,21 @@ def _merge_outlook_pool(old_text: str, new_text: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _provider_id(provider: dict) -> str:
+    return str(provider.get("id") or provider.get("provider_id") or "").strip()
+
+
+def _ensure_provider_id(provider: dict) -> str:
+    provider_id = _provider_id(provider)
+    if provider_id:
+        provider["id"] = provider_id
+        provider.pop("provider_id", None)
+        return provider_id
+    provider_id = f"provider-{uuid.uuid4().hex[:12]}"
+    provider["id"] = provider_id
+    return provider_id
 
 
 def _default_config() -> dict:
@@ -72,14 +88,10 @@ class RegisterService:
             self.start()
 
     def _load(self) -> dict:
-        try:
-            return _normalize(json.loads(self._store_file.read_text(encoding="utf-8")))
-        except Exception:
-            return _normalize({})
+        return _normalize(read_json_object(self._store_file, name="register.json"))
 
     def _save(self) -> None:
-        self._store_file.parent.mkdir(parents=True, exist_ok=True)
-        self._store_file.write_text(json.dumps(self._config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_file(self._store_file, self._config)
 
     def get(self) -> dict:
         with self._lock:
@@ -135,11 +147,31 @@ class RegisterService:
             return
         old_mail = self._config.get("mail") if isinstance(self._config.get("mail"), dict) else {}
         old_providers = old_mail.get("providers") if isinstance(old_mail.get("providers"), list) else []
+        old_outlook_by_id = {
+            _provider_id(provider): provider
+            for provider in old_providers
+            if isinstance(provider, dict) and provider.get("type") == "outlook_token" and _provider_id(provider)
+        }
+        old_outlook_by_order = [
+            provider
+            for provider in old_providers
+            if isinstance(provider, dict) and provider.get("type") == "outlook_token"
+        ]
+        outlook_index = 0
         next_import_reports: dict[int, dict] = {}
         for index, provider in enumerate(mail["providers"]):
-            if not isinstance(provider, dict) or provider.get("type") != "outlook_token":
+            if not isinstance(provider, dict):
                 continue
-            old = old_providers[index] if index < len(old_providers) and isinstance(old_providers[index], dict) else {}
+            _ensure_provider_id(provider)
+            if provider.get("type") != "outlook_token":
+                continue
+            provider_id = _provider_id(provider)
+            old = old_outlook_by_id.get(provider_id) or {}
+            if not old and index < len(old_providers) and isinstance(old_providers[index], dict) and old_providers[index].get("type") == "outlook_token":
+                old = old_providers[index]
+            if not old and outlook_index < len(old_outlook_by_order):
+                old = old_outlook_by_order[outlook_index]
+            outlook_index += 1
             old_text = str(old.get("mailboxes") or "") if old.get("type") == "outlook_token" else ""
             new_text = str(provider.get("mailboxes") or "")
             if new_text.strip():

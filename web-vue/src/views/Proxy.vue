@@ -481,7 +481,9 @@ async function saveGlobalProxy() {
   try {
     const next = prepareSettingsForEdit(currentSettings.value)
     next.proxy = globalProxy.value.trim()
-    const response = await settingsStore.updateSettings(next)
+    const response = await settingsStore.updateSettingsPatch({
+      proxy: next.proxy,
+    })
     currentSettings.value = prepareSettingsForEdit(response.config || next)
     toast.success('全局代理已保存')
   } catch (error: any) {

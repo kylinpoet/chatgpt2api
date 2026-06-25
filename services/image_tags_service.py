@@ -1,31 +1,32 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from threading import Lock
 
 from services.config import DATA_DIR
+from services.json_file import read_json_object, write_json_file
 
 TAGS_FILE = DATA_DIR / "image_tags.json"
+TAGS_LOCK = Lock()
 
 
 def _ensure_file() -> None:
     TAGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not TAGS_FILE.exists():
-        TAGS_FILE.write_text("{}", encoding="utf-8")
+        write_json_file(TAGS_FILE, {})
 
 
 def load_tags() -> dict[str, list[str]]:
-    _ensure_file()
-    try:
-        data = json.loads(TAGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    with TAGS_LOCK:
+        _ensure_file()
+        data = read_json_object(TAGS_FILE, name="image_tags.json")
+        return data if isinstance(data, dict) else {}
 
 
 def save_tags(data: dict[str, list[str]]) -> None:
-    _ensure_file()
-    TAGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with TAGS_LOCK:
+        _ensure_file()
+        write_json_file(TAGS_FILE, data)
 
 
 def get_tags(image_rel: str) -> list[str]:
@@ -33,35 +34,41 @@ def get_tags(image_rel: str) -> list[str]:
 
 
 def set_tags(image_rel: str, tags: list[str]) -> list[str]:
-    data = load_tags()
-    cleaned = list(dict.fromkeys(t.strip() for t in tags if t.strip()))
-    if cleaned:
-        data[image_rel] = cleaned
-    else:
-        data.pop(image_rel, None)
-    save_tags(data)
-    return cleaned
+    with TAGS_LOCK:
+        _ensure_file()
+        data = read_json_object(TAGS_FILE, name="image_tags.json")
+        cleaned = list(dict.fromkeys(t.strip() for t in tags if t.strip()))
+        if cleaned:
+            data[image_rel] = cleaned
+        else:
+            data.pop(image_rel, None)
+        write_json_file(TAGS_FILE, data)
+        return cleaned
 
 
 def remove_tags(image_rel: str) -> None:
-    data = load_tags()
-    if data.pop(image_rel, None) is not None:
-        save_tags(data)
+    with TAGS_LOCK:
+        _ensure_file()
+        data = read_json_object(TAGS_FILE, name="image_tags.json")
+        if data.pop(image_rel, None) is not None:
+            write_json_file(TAGS_FILE, data)
 
 
 def delete_tag(tag: str) -> int:
     """从所有图片中删除指定标签，返回受影响的图片数。"""
-    data = load_tags()
-    count = 0
-    for rel in list(data):
-        if tag in data[rel]:
-            data[rel] = [t for t in data[rel] if t != tag]
-            if not data[rel]:
-                del data[rel]
-            count += 1
-    if count > 0:
-        save_tags(data)
-    return count
+    with TAGS_LOCK:
+        _ensure_file()
+        data = read_json_object(TAGS_FILE, name="image_tags.json")
+        count = 0
+        for rel in list(data):
+            if tag in data[rel]:
+                data[rel] = [t for t in data[rel] if t != tag]
+                if not data[rel]:
+                    del data[rel]
+                count += 1
+        if count > 0:
+            write_json_file(TAGS_FILE, data)
+        return count
 
 
 def get_all_tags() -> list[str]:

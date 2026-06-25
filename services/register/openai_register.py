@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from curl_cffi import requests
 
 from services.account_service import account_service
+from services.json_file import read_json_object
 from services.proxy_service import ClearanceBundle, proxy_settings
 from services.register import mail_provider
 from utils.timezone import TIME_FORMAT, beijing_now_str
@@ -35,7 +36,7 @@ config = {
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
-    saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
+    saved_config = read_json_object(register_config_file, name="register.json")
     config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads") if key in saved_config})
 except Exception:
     pass

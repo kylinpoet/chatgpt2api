@@ -1084,6 +1084,7 @@ import {
   normalizeProxyRuntime,
   prepareSettingsForEdit,
   prepareSettingsForSave,
+  prepareSettingsPatch,
   settingsApi,
   type BackupItem,
   type BackupState,
@@ -1110,6 +1111,7 @@ const toast = useToast()
 const confirmDialog = useConfirmDialog()
 
 const localSettings = ref<Settings | null>(null)
+const savedSettingsBaseline = ref<Settings | null>(null)
 const activeSettingsTab = ref('basic')
 const isSaving = ref(false)
 const settingsLoadError = ref('')
@@ -1385,8 +1387,8 @@ const settingsFingerprint = (value: Settings | null | undefined): string => (
 )
 
 const hasUnsavedSettings = computed(() => {
-  if (!localSettings.value || !settings.value) return false
-  return settingsFingerprint(localSettings.value) !== settingsFingerprint(settings.value)
+  if (!localSettings.value || !savedSettingsBaseline.value) return false
+  return settingsFingerprint(localSettings.value) !== settingsFingerprint(savedSettingsBaseline.value)
 })
 
 function requireSavedSettings(actionLabel: string) {
@@ -1733,10 +1735,12 @@ async function deleteUserKey(item: UserKey) {
 
 async function persistSettings(showToast = false) {
   if (!localSettings.value) return null
-  const payload = prepareSettingsForEdit(localSettings.value)
-  const result = await settingsStore.updateSettings(payload)
+  const payload = prepareSettingsPatch(localSettings.value, savedSettingsBaseline.value)
+  const result = await settingsStore.updateSettingsPatch(payload)
   if (result.config) {
-    localSettings.value = prepareSettingsForEdit(result.config)
+    const next = prepareSettingsForEdit(result.config)
+    localSettings.value = next
+    savedSettingsBaseline.value = prepareSettingsForEdit(next)
   }
   await loadProxyRuntimeStatus(true)
   if (showToast) toast.success('设置保存成功')
@@ -2175,7 +2179,12 @@ async function loadExternalSources() {
 
 watch(settings, (value) => {
   if (!value) return
-  localSettings.value = prepareSettingsForEdit(value)
+  const next = prepareSettingsForEdit(value)
+  if (localSettings.value && savedSettingsBaseline.value && hasUnsavedSettings.value) {
+    return
+  }
+  localSettings.value = next
+  savedSettingsBaseline.value = prepareSettingsForEdit(next)
 }, { immediate: true })
 
 const reloadSettings = async () => {

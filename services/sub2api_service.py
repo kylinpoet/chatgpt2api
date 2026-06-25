@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import uuid
@@ -15,6 +14,7 @@ from curl_cffi.requests import Session
 
 from services.account_service import account_service
 from services.config import DATA_DIR
+from services.json_file import read_json_file, write_json_file
 
 
 SUB2API_CONFIG_FILE = DATA_DIR / "sub2api_config.json"
@@ -77,22 +77,18 @@ class Sub2APIConfig:
         self._servers: list[dict] = self._load()
 
     def _load(self) -> list[dict]:
-        if not self._store_file.exists():
-            return []
-        try:
-            raw = json.loads(self._store_file.read_text(encoding="utf-8"))
-            if isinstance(raw, list):
-                return [_normalize_server(item) for item in raw if isinstance(item, dict)]
-        except Exception:
-            pass
+        raw = read_json_file(
+            self._store_file,
+            name="sub2api_config.json",
+            default_factory=list,
+            expected_types=list,
+        )
+        if isinstance(raw, list):
+            return [_normalize_server(item) for item in raw if isinstance(item, dict)]
         return []
 
     def _save(self) -> None:
-        self._store_file.parent.mkdir(parents=True, exist_ok=True)
-        self._store_file.write_text(
-            json.dumps(self._servers, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_file(self._store_file, self._servers)
 
     def list_servers(self) -> list[dict]:
         with self._lock:

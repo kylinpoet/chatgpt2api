@@ -18,6 +18,8 @@ export type OutlookMailboxParseStats = {
 }
 
 export type RegisterProvider = {
+  id?: string
+  provider_id?: string
   enable?: boolean
   type?: string
   label?: string

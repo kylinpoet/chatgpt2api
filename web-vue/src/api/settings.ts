@@ -62,6 +62,41 @@ const DEFAULT_IMAGE_ERROR_MESSAGES: ImageErrorMessages = {
   text_reply: '上游返回了文本说明，未生成图片。请调整提示词或重试。',
 }
 
+const SETTINGS_SAVE_KEYS = [
+  'proxy',
+  'proxy_runtime',
+  'base_url',
+  'refresh_account_interval_minute',
+  'image_retention_days',
+  'image_poll_timeout_secs',
+  'image_stream_timeout_secs',
+  'image_poll_interval_secs',
+  'image_poll_initial_wait_secs',
+  'image_account_concurrency',
+  'image_parallel_generation',
+  'image_error_friendly_enabled',
+  'image_error_messages',
+  'image_settle_enabled',
+  'image_check_before_hit_enabled',
+  'image_settle_secs',
+  'image_timeout_retry_secs',
+  'auto_remove_invalid_accounts',
+  'auto_remove_rate_limited_accounts',
+  'auto_relogin_after_refresh',
+  'log_levels',
+  'global_system_prompt',
+  'sensitive_words',
+  'ai_review',
+  'public_display',
+  'image_generation',
+  'quota_limits',
+  'runtime_capacity',
+  'image_storage',
+  'backup',
+  'chat_completion_cache',
+  'third_party_apps',
+] as const
+
 function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
@@ -85,6 +120,11 @@ function boolValue(value: unknown, fallback: boolean) {
 
 function cloneRawSettings<T>(value: T | null | undefined): RawSettings {
   return JSON.parse(JSON.stringify(value || {})) as RawSettings
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (typeof value === 'undefined') return value
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 export function normalizeThirdPartyApps(raw: unknown): ThirdPartyAppsSettings {
@@ -283,26 +323,60 @@ export function prepareSettingsForEdit(raw: RawSettings | Settings | null | unde
 
 function toBackendSettings(settings: Settings): RawSettings {
   const normalized = prepareSettingsForEdit(settings)
-  const payload: RawSettings = cloneRawSettings(normalized)
-  payload.proxy = cleanString(normalized.proxy)
-  payload.proxy_runtime = normalizeProxyRuntime(normalized.proxy_runtime)
-  payload.base_url = cleanString(normalized.base_url)
+  const payload: RawSettings = {
+    proxy: cleanString(normalized.proxy),
+    proxy_runtime: normalizeProxyRuntime(normalized.proxy_runtime),
+    base_url: cleanString(normalized.base_url),
+    refresh_account_interval_minute: numberValue(normalized.refresh_account_interval_minute, 5, 1),
+    image_poll_timeout_secs: numberValue(normalized.image_poll_timeout_secs, 120, 1),
+    image_stream_timeout_secs: numberValue(normalized.image_stream_timeout_secs, 300, 1),
+    image_poll_interval_secs: numberValue(normalized.image_poll_interval_secs, 10, 0.5),
+    image_poll_initial_wait_secs: numberValue(normalized.image_poll_initial_wait_secs, 10, 0),
+    image_account_concurrency: numberValue(normalized.image_account_concurrency, 3, 1),
+    image_parallel_generation: boolValue(normalized.image_parallel_generation, true),
+    image_error_friendly_enabled: boolValue(normalized.image_error_friendly_enabled, false),
+    image_error_messages: cloneRawSettings(normalized.image_error_messages),
+    image_settle_enabled: boolValue(normalized.image_settle_enabled, true),
+    image_check_before_hit_enabled: boolValue(normalized.image_check_before_hit_enabled, true),
+    image_settle_secs: numberValue(normalized.image_settle_secs, 5, 0.5),
+    image_timeout_retry_secs: numberValue(normalized.image_timeout_retry_secs, 30, 1),
+    auto_remove_invalid_accounts: boolValue(normalized.auto_remove_invalid_accounts, false),
+    auto_remove_rate_limited_accounts: boolValue(normalized.auto_remove_rate_limited_accounts, false),
+    auto_relogin_after_refresh: boolValue(normalized.auto_relogin_after_refresh, false),
+    log_levels: Array.isArray(normalized.log_levels) ? [...normalized.log_levels] : [],
+    global_system_prompt: cleanString(normalized.global_system_prompt),
+    sensitive_words: Array.isArray(normalized.sensitive_words) ? [...normalized.sensitive_words] : [],
+    ai_review: cloneRawSettings(normalized.ai_review),
+    public_display: cloneRawSettings(normalized.public_display),
+    image_generation: cloneRawSettings(normalized.image_generation),
+    quota_limits: cloneRawSettings(normalized.quota_limits),
+    runtime_capacity: cloneRawSettings(normalized.runtime_capacity),
+    image_storage: cloneRawSettings(normalized.image_storage),
+    backup: cloneRawSettings(normalized.backup),
+    chat_completion_cache: cloneRawSettings(normalized.chat_completion_cache),
+    third_party_apps: cloneRawSettings(normalized.third_party_apps),
+  }
   payload.image_retention_days = numberValue(
     normalized.image_retention_days,
     15,
     1,
   )
-  payload.basic = {
-    ...(payload.basic || {}),
-    proxy: payload.proxy,
-    base_url: payload.base_url,
-    image_expire_hours: payload.image_retention_days,
-  }
   return payload
 }
 
 export function prepareSettingsForSave(settings: Settings): RawSettings {
   return toBackendSettings(settings)
+}
+
+export function prepareSettingsPatch(settings: Settings, baseline?: Settings | null): RawSettings {
+  const next = toBackendSettings(settings)
+  if (!baseline) return next
+  const previous = toBackendSettings(baseline)
+  return Object.fromEntries(
+    SETTINGS_SAVE_KEYS
+      .filter((key) => JSON.stringify(next[key]) !== JSON.stringify(previous[key]))
+      .map((key) => [key, cloneJsonValue(next[key])]),
+  )
 }
 
 export const settingsApi = {
@@ -317,6 +391,15 @@ export const settingsApi = {
 
   async update(settings: Settings): Promise<SettingsUpdateResponse> {
     const response = await apiClient.post<RawSettings, { config: RawSettings }>('/api/settings', toBackendSettings(settings))
+    return {
+      status: 'ok',
+      message: 'saved',
+      config: normalizeSettings(response.config),
+    }
+  },
+
+  async updatePartial(payload: RawSettings): Promise<SettingsUpdateResponse> {
+    const response = await apiClient.post<RawSettings, { config: RawSettings }>('/api/settings', cloneRawSettings(payload))
     return {
       status: 'ok',
       message: 'saved',

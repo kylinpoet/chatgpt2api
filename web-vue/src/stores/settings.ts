@@ -1,6 +1,7 @@
 ﻿import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { prepareSettingsForEdit, settingsApi } from '@/api'
+import type { RawSettings } from '@/api/settings'
 import type { Settings, SettingsUpdateResponse } from '@/types/api'
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -22,10 +23,17 @@ export const useSettingsStore = defineStore('settings', () => {
     return response
   }
 
+  async function updateSettingsPatch(patch: RawSettings): Promise<SettingsUpdateResponse> {
+    const response = await settingsApi.updatePartial(patch)
+    settings.value = prepareSettingsForEdit(response.config || settings.value)
+    return response
+  }
+
   return {
     settings,
     isLoading,
     loadSettings,
     updateSettings,
+    updateSettingsPatch,
   }
 })
