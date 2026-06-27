@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.4.3 - 2026-06-28
+
++ [修复] `/v1/images/edits` 流式响应改为官方 Images API 的 `image_edit.partial_image` / `image_edit.completed` 事件格式，移除图片流式接口里的通用 `data: [DONE]` 包装。
++ [修复] `/v1/images/generations` 流式响应同步改为 `image_generation.partial_image` / `image_generation.completed` 事件格式，避免客户端误按文本对话流解析图片结果。
++ [优化] 图片流式响应继续保留日志所需的账号和会话内部字段，但发送给客户端前会自动剔除，不影响调用日志追踪。
++ [优化] 调用日志列表不再把会话 ID 显示在令牌名称下方，列表单元格改为垂直居中；会话 ID 仍保留在详情中用于排查。
+
 ## 2.4.2 - 2026-06-27
 
 + [修复] 代理测试和上游请求统一支持“跳过 SSL 证书校验”，避免 socks5、https 代理在本地 CA 链异常时检测失败。

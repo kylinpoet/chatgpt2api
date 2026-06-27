@@ -2211,9 +2211,63 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
         raise ImageGenerationError(image_stream_error_message(last_error), conversation_id="")
 
 
-def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterator[dict[str, Any]]:
+def _image_stream_payload(output: ImageOutput, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    item = {"type": event_type, **payload}
+    if output.account_email:
+        item["_account_email"] = output.account_email
+    if output.conversation_id:
+        item["_conversation_id"] = output.conversation_id
+    return item
+
+
+def _image_stream_partial_count(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def stream_image_chunks(
+    outputs: Iterable[ImageOutput],
+    event_prefix: str = "image_generation",
+    usage_builder: Callable[[list[dict[str, Any]]], dict[str, Any]] | None = None,
+    partial_images: object = 0,
+) -> Iterator[dict[str, Any]]:
+    prefix = str(event_prefix or "image_generation").strip() or "image_generation"
+    emit_partial = _image_stream_partial_count(partial_images) > 0
     for output in outputs:
-        yield output.to_chunk()
+        if output.kind == "result":
+            for item_index, item in enumerate(output.data):
+                if not isinstance(item, dict):
+                    continue
+                b64_json = str(item.get("b64_json") or "").strip()
+                if not b64_json:
+                    continue
+                if emit_partial:
+                    yield _image_stream_payload(
+                        output,
+                        f"{prefix}.partial_image",
+                        {
+                            "b64_json": b64_json,
+                            "partial_image_index": max(0, item_index),
+                        },
+                    )
+                completed: dict[str, Any] = {"b64_json": b64_json}
+                if usage_builder:
+                    usage = usage_builder([item])
+                    if usage:
+                        completed["usage"] = usage
+                completed_payload = _image_stream_payload(output, f"{prefix}.completed", completed)
+                image_url = str(item.get("url") or "").strip()
+                if image_url:
+                    completed_payload["_image_urls"] = [image_url]
+                yield completed_payload
+        elif output.kind == "message" and output.text:
+            yield _image_stream_payload(
+                output,
+                f"{prefix}.failed",
+                {"error": {"message": output.text, "type": "image_generation_error"}},
+            )
 
 
 def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:

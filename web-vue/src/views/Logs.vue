@@ -170,7 +170,7 @@
               class="border-t border-border transition-colors hover:bg-muted/30"
               :class="{ 'bg-primary/5': isLogSelected(item.id) }"
             >
-              <td class="py-4 pl-4 pr-2 align-top">
+              <td class="py-4 pl-4 pr-2 align-middle">
                 <Checkbox
                   :model-value="isLogSelected(item.id)"
                   @update:model-value="(checked) => toggleLogSelection(item.id, checked)"
@@ -178,29 +178,26 @@
                   <span class="sr-only">选择日志 {{ item.time || item.id }}</span>
                 </Checkbox>
               </td>
-              <td class="py-4 pr-5 align-top text-xs text-muted-foreground">
+              <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
                 <p class="whitespace-nowrap text-foreground">{{ item.time || '-' }}</p>
               </td>
-              <td class="py-4 pr-5 align-top">
+              <td class="py-4 pr-5 align-middle">
                 <MetaChip size="xs" tone="muted">{{ typeLabel(item.type) }}</MetaChip>
               </td>
-              <td class="py-4 pr-5 align-top">
+              <td class="py-4 pr-5 align-middle">
                 <p class="max-w-[12rem] truncate text-xs text-foreground" :title="tokenLabel(item)">
                   {{ tokenLabel(item) || '-' }}
                 </p>
-                <p v-if="item.conversationId" class="mt-1 max-w-[12rem] truncate font-mono text-[11px] text-muted-foreground" :title="item.conversationId">
-                  {{ item.conversationId }}
-                </p>
               </td>
-              <td class="py-4 pr-5 align-top text-xs text-muted-foreground">
+              <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
                 {{ formatDuration(item.durationMs) || '-' }}
               </td>
-              <td class="py-4 pr-5 align-top">
+              <td class="py-4 pr-5 align-middle">
                 <StateBadge :tone="statusTone(item)" shape="rounded" :bordered="false">
                   {{ statusLabel(item) }}
                 </StateBadge>
               </td>
-              <td class="py-4 pr-5 align-top">
+              <td class="py-4 pr-5 align-middle">
                 <LogImagePreviewCell
                   :image-urls="item.imageUrls"
                   :first-image-broken="isPreviewBroken(item.imageUrls[0] || '')"
@@ -209,12 +206,12 @@
                   @image-error="markPreviewBroken"
                 />
               </td>
-              <td class="py-4 pr-5 align-top">
+              <td class="py-4 pr-5 align-middle">
                 <p class="max-w-[28rem] truncate text-xs text-foreground" :class="{ 'text-rose-600': isFailed(item) }" :title="summaryText(item)">
                   {{ summaryText(item) || '-' }}
                 </p>
               </td>
-              <td class="py-4 pr-4 text-right align-top">
+              <td class="py-4 pr-4 text-right align-middle">
                 <div class="flex justify-end gap-1.5">
                   <Button size="xs" variant="outline" @click="openDetail(item)">
                     查看详情

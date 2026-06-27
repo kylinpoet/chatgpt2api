@@ -19,13 +19,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from services.config import DATA_DIR
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from services.realtime_monitor_service import realtime_monitor_service
-from utils.helper import anthropic_sse_stream, sse_json_stream
+from utils.helper import anthropic_sse_stream, image_sse_stream, sse_json_stream
 from utils.log import logger
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_call_id"}
+INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_call_id", "_image_urls"}
 LOG_IMAGE_URL_RE = re.compile(r"(?:!\[[^\]]*\]\()(?P<url>(?:https?://|/images/|/image-thumbnails/)[^\s)\"']+)\)")
 PERF_WAIT_WARN_MS = 1000
 
@@ -441,7 +441,7 @@ def _collect_urls(value: object) -> list[str]:
         for key, item in value.items():
             if key == "url" and isinstance(item, str):
                 urls.append(item)
-            elif key == "urls" and isinstance(item, list):
+            elif key in {"urls", "_image_urls"} and isinstance(item, list):
                 urls.extend(str(url) for url in item if isinstance(url, str))
             else:
                 urls.extend(_collect_urls(item))
@@ -617,7 +617,10 @@ class LoggedCall:
             response.pop("_call_id", None)
             return response
 
-        sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
+        if self.endpoint.startswith("/v1/images"):
+            sender = image_sse_stream
+        else:
+            sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
         first_item_submitted = time.perf_counter()
 
         def _next_item_with_timing():

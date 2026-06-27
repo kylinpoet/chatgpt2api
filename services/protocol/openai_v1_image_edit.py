@@ -78,7 +78,18 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         trace_image_perf=bool(body.get("_trace_image_perf")),
     ))
     if body.get("stream"):
-        return stream_image_chunks(outputs)
+        input_text_tokens = count_text_tokens(prompt, model)
+        input_image_tokens = count_image_inputs_tokens(images, model)
+        return stream_image_chunks(
+            outputs,
+            event_prefix="image_edit",
+            partial_images=body.get("partial_images"),
+            usage_builder=lambda data: image_usage(
+                input_text_tokens=input_text_tokens,
+                input_image_tokens=input_image_tokens,
+                output_tokens=count_image_output_items_tokens(data, size, quality),
+            ),
+        )
     result = collect_image_outputs(outputs)
     result["usage"] = image_usage(
         input_text_tokens=count_text_tokens(prompt, model),
