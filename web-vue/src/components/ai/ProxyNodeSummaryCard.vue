@@ -10,6 +10,7 @@
       </span>
     </div>
     <p class="proxy-node-summary-card__url">{{ maskedUrl || emptyText }}</p>
+    <p class="proxy-node-summary-card__meta">图片并发 {{ imageLimit > 0 ? imageLimit : '不限' }}</p>
   </article>
 </template>
 
@@ -18,7 +19,7 @@ import { computed } from 'vue'
 import type { ProxyNode } from '@/api/proxy'
 
 const props = withDefaults(defineProps<{
-  node: Pick<ProxyNode, 'id' | 'name' | 'url' | 'enabled'>
+  node: Pick<ProxyNode, 'id' | 'name' | 'url' | 'enabled' | 'image_concurrency_limit'>
   emptyText?: string
 }>(), {
   emptyText: '未设置',
@@ -26,6 +27,7 @@ const props = withDefaults(defineProps<{
 
 const isEnabled = computed(() => props.node.enabled !== false)
 const displayName = computed(() => props.node.name || props.node.id)
+const imageLimit = computed(() => Math.max(0, Number(props.node.image_concurrency_limit || 0)))
 const maskedUrl = computed(() => maskProxy(props.node.url))
 
 function maskProxy(value: unknown) {
@@ -84,6 +86,13 @@ function maskProxy(value: unknown) {
   overflow-wrap: anywhere;
   color: hsl(var(--muted-foreground));
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.proxy-node-summary-card__meta {
+  margin-top: 4px;
+  color: hsl(var(--muted-foreground));
   font-size: 11px;
   line-height: 1.35;
 }

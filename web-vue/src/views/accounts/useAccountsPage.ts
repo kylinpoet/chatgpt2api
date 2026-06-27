@@ -299,7 +299,7 @@ export function useAccountsPage() {
   ] as const
 
   const accountProxyModeOptions = [
-    { label: '使用全局代理', value: 'global' },
+    { label: '使用默认代理', value: 'global' },
     { label: '强制直连', value: 'direct' },
     { label: '代理组（多节点）', value: 'group' },
     { label: '自定义代理', value: 'custom' },
@@ -410,7 +410,7 @@ export function useAccountsPage() {
 
   const accountProxyPreview = computed(() => {
     const reference = parseProxyReference(form.proxy)
-    if (reference.mode === 'global') return '使用全局代理'
+    if (reference.mode === 'global') return '使用默认代理'
     if (reference.mode === 'direct') return '强制直连'
     if (reference.mode === 'profile') {
       return `历史兼容引用：profile:${reference.value || '-'}`
@@ -424,7 +424,7 @@ export function useAccountsPage() {
 
   const accountGroupProxyPreview = computed(() => {
     const reference = parseProxyReference(accountGroupForm.proxy)
-    if (reference.mode === 'global') return '使用全局代理'
+    if (reference.mode === 'global') return '使用默认代理'
     if (reference.mode === 'direct') return '强制直连'
     if (reference.mode === 'profile') {
       return `历史兼容引用：profile:${reference.value || '-'}`

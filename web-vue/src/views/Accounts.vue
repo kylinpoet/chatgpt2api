@@ -421,7 +421,7 @@
                         </label>
 
                         <SurfaceBox v-else tone="muted" dashed density="compact" class="flex min-h-[3.25rem] items-center">
-                          {{ proxyMode === 'direct' ? '该账号强制直连，不读取账号组或全局代理。' : '该账号不单独指定代理，会按账号组代理组、全局代理顺序回退。' }}
+                          {{ proxyMode === 'direct' ? '该账号强制直连，不读取账号组或默认代理。' : '该账号不单独指定代理，会按账号组代理、默认代理顺序回退。' }}
                         </SurfaceBox>
                       </div>
 
@@ -530,7 +530,7 @@
                     </label>
 
                     <SurfaceBox v-else tone="muted" dashed density="compact" class="min-h-[2.75rem]">
-                      {{ accountGroupProxyMode === 'direct' ? '该账号组强制直连，组内账号不会回退全局代理。' : '账号组不单独指定代理，组内账号会继续回退全局代理。' }}
+                      {{ accountGroupProxyMode === 'direct' ? '该账号组强制直连，组内账号不会回退默认代理。' : '账号组不单独指定代理，组内账号会继续回退默认代理。' }}
                     </SurfaceBox>
 
                     <SurfaceBox tone="muted" density="compact">
@@ -967,7 +967,7 @@ const accountGroupRows = computed(() => accountGroups.value.map((group) => {
     ? proxyGroups.value.find((item) => item.id === proxyReference.value)
     : null
   const proxyLabel = (() => {
-    if (proxyReference.mode === 'global') return '使用全局代理'
+    if (proxyReference.mode === 'global') return '使用默认代理'
     if (proxyReference.mode === 'direct') return '强制直连'
     if (proxyReference.mode === 'group') return `代理组：${proxyGroup?.name || proxyReference.value || '-'}`
     if (proxyReference.mode === 'profile') return `历史代理：${proxyReference.value || '-'}`

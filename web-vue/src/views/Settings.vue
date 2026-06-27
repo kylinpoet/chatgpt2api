@@ -53,9 +53,9 @@
                   />
                 </FormField>
 
-                <FormField label="全局代理" class="md:col-span-2">
+                <FormField label="默认代理" class="md:col-span-2">
                   <template #label-extra>
-                    <HelpTip text="留空表示不使用代理；账号单独代理和账号组代理组优先于全局代理。" />
+                    <HelpTip text="账号个人代理、账号组代理优先于默认代理。可填写代理 URL、direct 或 group:代理组ID；完整选择可到代理管理维护。" />
                   </template>
                   <div class="flex flex-col gap-2 sm:flex-row">
                     <Input
@@ -70,7 +70,7 @@
                       variant="outline"
                       root-class="shrink-0"
                       :disabled="proxyBusy === 'test'"
-                      @click="testGlobalProxy"
+                      @click="testDefaultProxy"
                     >
                       {{ proxyBusy === 'test' ? '测试中...' : '测试代理' }}
                     </Button>
@@ -1151,7 +1151,7 @@ import {
   type BackupTestResult,
   type ImageStorageTestResult,
 } from '@/api/settings'
-import { proxyApi, type ClearanceTestResult, type ProxyRuntimeStatus, type ProxyTestResult } from '@/api/proxy'
+import { parseProxyReference, proxyApi, type ClearanceTestResult, type ProxyRuntimeStatus, type ProxyTestResult } from '@/api/proxy'
 import { userKeysApi, type UserKey } from '@/api/userKeys'
 import { getAuthToken } from '@/api/client'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -1605,15 +1605,24 @@ function setLogLevel(level: string, enabled: boolean) {
     : current.filter((item) => item !== level)
 }
 
-async function testGlobalProxy() {
+async function testDefaultProxy() {
   const candidate = String(localSettings.value?.proxy || '').trim()
-  if (!candidate) {
-    toast.warning('请先填写全局代理')
+  const reference = parseProxyReference(candidate)
+  if (reference.mode === 'global' || reference.mode === 'direct') {
+    toast.info('直连模式无需测试代理')
+    return
+  }
+  if (reference.mode === 'group' && !reference.value) {
+    toast.warning('请填写代理组 ID')
+    return
+  }
+  if ((reference.mode === 'custom' || reference.mode === 'profile') && !reference.value) {
+    toast.warning('请先填写默认代理')
     return
   }
   const confirmed = await confirmDialog.ask({
-    title: '测试全局代理',
-    message: '即将使用当前填写的全局代理发起连接测试，不会保存设置。是否继续？',
+    title: '测试默认代理',
+    message: '即将使用当前填写的默认代理发起连接测试，不会保存设置。是否继续？',
     confirmText: '开始测试',
     cancelText: '取消',
   })
@@ -1622,6 +1631,34 @@ async function testGlobalProxy() {
   proxyBusy.value = 'test'
   proxyTestResult.value = null
   try {
+    if (reference.mode === 'group') {
+      const response = await proxyApi.testGroup({ id: reference.value })
+      const results = response.results || []
+      const failed = results.filter((item) => !item.result.ok)
+      const firstResult = results[0]?.result
+      proxyTestResult.value = {
+        ok: results.length > 0 && failed.length === 0,
+        status: firstResult?.status || 0,
+        latency_ms: results.reduce((max, item) => Math.max(max, Number(item.result.latency_ms || 0)), 0),
+        error: failed.length ? `代理组检测完成，失败 ${failed.length} 个节点` : null,
+      }
+      if (proxyTestResult.value.ok) {
+        toast.success(`默认代理组可用：${results.length} 个节点`)
+      } else {
+        toast.warning(proxyTestResult.value.error || '代理组测试失败')
+      }
+      return
+    }
+    if (reference.mode === 'profile') {
+      const response = await proxyApi.testProfile({ id: reference.value })
+      proxyTestResult.value = response.result
+      if (response.result.ok) {
+        toast.success(`代理可用：${response.result.latency_ms} ms`)
+      } else {
+        toast.warning(response.result.error || '代理测试失败')
+      }
+      return
+    }
     const response = await proxyApi.test(candidate)
     proxyTestResult.value = response.result
     if (response.result.ok) {

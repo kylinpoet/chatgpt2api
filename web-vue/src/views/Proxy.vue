@@ -1,51 +1,86 @@
-<template>
+﻿<template>
   <div class="space-y-6">
     <PagePanel class="space-y-5">
       <PanelHeader title="代理管理" align="start">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            全局代理只作为默认回退；账号和账号组可以覆盖它。
+            代理优先级：账号个人代理 > 账号组代理/代理组 > 默认代理。
           </p>
         </template>
         <template #actions>
           <Button size="sm" variant="outline" :disabled="loading" @click="loadData">
             {{ loading ? '刷新中...' : '刷新' }}
           </Button>
-          <Button size="sm" variant="primary" :disabled="savingGlobal || loading" @click="saveGlobalProxy">
-            {{ savingGlobal ? '保存中...' : '保存全局代理' }}
+          <Button size="sm" variant="primary" :disabled="savingDefaultProxy || loading" @click="saveDefaultProxy">
+            {{ savingDefaultProxy ? '保存中...' : '保存默认代理' }}
           </Button>
         </template>
       </PanelHeader>
 
       <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <FormSection density="roomy">
-          <label class="block text-xs">
-            <span class="ui-field-label">全局代理 URL</span>
-            <Input
-              v-model.trim="globalProxy"
-              block
-              root-class="font-mono"
-              placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
-            />
-          </label>
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-[12rem_minmax(0,1fr)]">
+            <label class="block text-xs">
+              <span class="ui-field-label">默认代理模式</span>
+              <GroupedSelectMenu
+                :model-value="defaultProxyMode"
+                :options="defaultProxyModeOptions"
+                aria-label="默认代理模式"
+                selected-indicator="none"
+                block
+                @update:model-value="setDefaultProxyMode"
+              />
+            </label>
+
+            <label v-if="defaultProxyMode === 'group'" class="block text-xs">
+              <span class="ui-field-label">默认代理组</span>
+              <GroupedSelectMenu
+                :model-value="selectedDefaultProxyGroupId"
+                :options="defaultProxyGroupOptions"
+                :disabled="loading"
+                aria-label="默认代理组"
+                selected-indicator="none"
+                block
+                @update:model-value="selectDefaultProxyGroup"
+              />
+            </label>
+
+            <label v-else-if="defaultProxyMode === 'custom'" class="block text-xs">
+              <span class="ui-field-label">自定义代理 URL</span>
+              <Input
+                :model-value="defaultCustomProxyInput"
+                block
+                root-class="font-mono"
+                placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+                @update:model-value="setDefaultCustomProxyInput"
+              />
+            </label>
+
+            <div v-else class="flex min-h-[2.5rem] items-center rounded-lg border border-dashed border-border bg-muted/20 px-3 text-xs text-muted-foreground">
+              未指定账号或账号组代理时直连。
+            </div>
+          </div>
           <ActionRow class="mt-3" gap="tight">
-            <Button size="xs" variant="outline" :disabled="testingKey === GLOBAL_TEST_KEY || !globalProxy" @click="testGlobalProxy">
-              {{ testingKey === GLOBAL_TEST_KEY ? '测试中...' : '测试全局代理' }}
+            <Button size="xs" variant="outline" :disabled="testingKey === DEFAULT_TEST_KEY || !canTestDefaultProxy" @click="testDefaultProxy">
+              {{ testingKey === DEFAULT_TEST_KEY ? '测试中...' : '测试默认代理' }}
             </Button>
-            <Button size="xs" variant="outline" :disabled="savingGlobal || testingKey === GLOBAL_TEST_KEY" @click="clearGlobalProxy">
-              清空
+            <Button size="xs" variant="outline" :disabled="savingDefaultProxy || testingKey === DEFAULT_TEST_KEY" @click="setDefaultProxyDirect">
+              设为直连
             </Button>
           </ActionRow>
+          <p class="mt-3 truncate text-xs text-muted-foreground" :title="defaultProxyPreview">
+            当前默认代理：<span class="text-foreground">{{ defaultProxyPreview }}</span>
+          </p>
         </FormSection>
 
         <FormSection density="roomy" surface="background">
-          <p class="text-xs text-muted-foreground">全局测试结果</p>
-          <div v-if="globalTestResult" class="mt-3 space-y-1 text-xs">
-            <p :class="globalTestResult.ok ? 'text-emerald-600' : 'text-rose-600'">
-              {{ globalTestResult.ok ? '可用' : '不可用' }}
+          <p class="text-xs text-muted-foreground">默认代理测试结果</p>
+          <div v-if="defaultTestResult" class="mt-3 space-y-1 text-xs">
+            <p :class="defaultTestResult.ok ? 'text-emerald-600' : 'text-rose-600'">
+              {{ defaultTestResult.ok ? '可用' : '不可用' }}
             </p>
-            <p class="text-muted-foreground">HTTP {{ globalTestResult.status || '-' }} · {{ globalTestResult.latency_ms || 0 }}ms</p>
-            <p v-if="globalTestResult.error" class="break-all text-rose-600">{{ globalTestResult.error }}</p>
+            <p class="text-muted-foreground">HTTP {{ defaultTestResult.status || '-' }} · {{ defaultTestResult.latency_ms || 0 }}ms</p>
+            <p v-if="defaultTestResult.error" class="break-all text-rose-600">{{ defaultTestResult.error }}</p>
           </div>
           <p v-else class="mt-3 text-xs text-muted-foreground">尚未测试</p>
         </FormSection>
@@ -53,9 +88,11 @@
     </PagePanel>
 
     <PagePanel class="space-y-4">
-      <PanelHeader title="代理组">
+      <PanelHeader title="代理组 / 多出口">
         <template #copy>
-          <p class="mt-1 text-xs text-muted-foreground">一个组包含多个节点，用于账号组或 <code>group:代理组ID</code>。</p>
+          <p class="mt-1 text-xs text-muted-foreground">
+            一个代理组就是一组多出口节点；图片请求会从未满的节点里随机选择一个，请求结束前固定该出口。
+          </p>
         </template>
         <template #actions>
           <Input
@@ -74,17 +111,17 @@
         description="读取代理组、节点和健康状态。"
       />
       <StateBlock v-else-if="filteredGroups.length === 0">
-        <EmptyState plain title="暂无代理组" description="新建代理组后，可绑定账号组或在账号代理里引用。" />
+        <EmptyState plain title="暂无代理组" description="新建代理组后，可绑定账号组、账号或默认代理使用。" />
       </StateBlock>
       <TableShell v-else>
-        <table class="min-w-[1040px] w-full table-fixed text-left text-sm">
+        <table class="min-w-[1080px] w-full table-fixed text-left text-sm">
           <colgroup>
-            <col class="w-[18%]" />
-            <col class="w-[8rem]" />
-            <col class="w-[34%]" />
-            <col class="w-[14%]" />
+            <col class="w-[20%]" />
+            <col class="w-[7rem]" />
+            <col class="w-[30%]" />
+            <col class="w-[15%]" />
             <col class="w-[16%]" />
-            <col class="w-[12rem]" />
+            <col class="w-[16rem]" />
           </colgroup>
           <thead class="text-xs uppercase tracking-[0.16em] text-muted-foreground">
             <tr>
@@ -105,8 +142,8 @@
             >
               <td class="py-3 pr-4 align-top">
                 <p class="truncate font-medium">{{ group.name || group.id }}</p>
-                <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ group.id }}</p>
-                <p class="mt-1 truncate text-xs text-muted-foreground">{{ groupRotationSummary(group) }}</p>
+                <p class="mt-1 text-xs text-muted-foreground">多出口 · {{ group.nodes.length }} 个节点</p>
+                <p class="mt-1 truncate font-mono text-[11px] text-muted-foreground" :title="group.id">ID：{{ group.id }}</p>
                 <p v-if="group.notes" class="mt-1 truncate text-xs text-muted-foreground" :title="group.notes">{{ group.notes }}</p>
               </td>
               <td class="py-3 pr-4 align-top">
@@ -124,8 +161,13 @@
                 </div>
               </td>
               <td class="py-3 pr-4 align-top">
-                <button type="button" class="font-mono text-xs text-primary hover:underline" @click="copyGroupReference(group.id)">
-                  group:{{ group.id }}
+                <button
+                  type="button"
+                  class="max-w-full truncate rounded-md border border-border bg-muted/20 px-2 py-1 text-left font-mono text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-foreground"
+                  :title="`点击复制 ${proxyGroupReference(group)}`"
+                  @click="copyProxyGroupReference(group)"
+                >
+                  {{ proxyGroupReference(group) }}
                 </button>
               </td>
               <td class="py-3 pr-4 align-top">
@@ -142,19 +184,19 @@
                 </div>
               </td>
               <td class="py-3 text-right align-top">
-                <div class="inline-flex flex-wrap justify-end gap-1.5">
-                  <Button size="xs" variant="outline" root-class="w-16 justify-center" :disabled="testingKey === `group:${group.id}:all` || group.nodes.length === 0" @click="testProxyGroupAll(group)">
-                    {{ testingKey === `group:${group.id}:all` ? '中...' : '测全部' }}
-                  </Button>
+                <div class="flex items-center justify-end gap-2">
                   <Button size="xs" variant="outline" root-class="w-14 justify-center" @click="openEditGroupModal(group)">
                     编辑
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-14 justify-center" :disabled="savingGroupId === group.id" @click="toggleProxyGroup(group)">
-                    {{ group.enabled ? '停用' : '启用' }}
-                  </Button>
-                  <Button size="xs" variant="outline" root-class="w-14 justify-center text-rose-600" :disabled="deletingGroupId === group.id" @click="deleteProxyGroup(group)">
-                    删除
-                  </Button>
+                  <FloatingActionMenu
+                    label="更多"
+                    :items="proxyGroupActionItems(group)"
+                    align="right"
+                    size="sm"
+                    trigger-class="h-7 justify-center px-2 text-[11px]"
+                    :trigger-width="64"
+                    @select="handleProxyGroupAction(group, $event)"
+                  />
                 </div>
               </td>
             </tr>
@@ -174,19 +216,9 @@
 
       <ModalBody class="space-y-4">
         <FormSection title="基础信息" surface="plain">
-              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1fr)_16rem]">
                 <label class="text-xs">
-                  <span class="ui-field-label">代理组 ID</span>
-                  <Input
-                    :model-value="groupForm.id"
-                    :disabled="Boolean(editingGroupId)"
-                    block
-                    placeholder="hk-pool / us-west"
-                    @update:model-value="groupForm.id = normalizeGroupId($event)"
-                  />
-                </label>
-                <label class="text-xs">
-                  <span class="ui-field-label">显示名称</span>
+                  <span class="ui-field-label">代理组名称</span>
                   <Input
                     :model-value="groupForm.name"
                     block
@@ -194,9 +226,18 @@
                     @update:model-value="groupForm.name = $event.trim()"
                   />
                 </label>
+                <label class="text-xs">
+                  <span class="ui-field-label">代理组 ID</span>
+                  <Input
+                    :model-value="groupForm.id"
+                    block
+                    root-class="font-mono"
+                    :disabled="Boolean(editingGroupId)"
+                    @update:model-value="groupForm.id = normalizeGroupId($event)"
+                  />
+                </label>
               </div>
-
-              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1fr)_10rem_auto]">
+              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1fr)_auto]">
                 <label class="text-xs">
                   <span class="ui-field-label">备注</span>
                   <Input
@@ -204,17 +245,6 @@
                     block
                     placeholder="可选"
                     @update:model-value="groupForm.notes = $event.trim()"
-                  />
-                </label>
-                <label class="text-xs">
-                  <span class="ui-field-label">轮换间隔</span>
-                  <Input
-                    :model-value="String(groupForm.rotation_interval_minutes)"
-                    block
-                    type="number"
-                    min="0"
-                    step="1"
-                    @update:model-value="groupForm.rotation_interval_minutes = normalizeRotationMinutes($event)"
                   />
                 </label>
                 <div class="flex items-end">
@@ -234,15 +264,7 @@
                     :key="`${node.id}-${index}`"
                     surface="muted"
                   >
-                    <div class="grid grid-cols-1 gap-2 md:grid-cols-[8rem_9rem_minmax(0,1fr)_auto]">
-                      <label class="text-xs">
-                        <span class="ui-field-label">节点 ID</span>
-                        <Input
-                          :model-value="node.id"
-                          block
-                          @update:model-value="node.id = normalizeGroupId($event)"
-                        />
-                      </label>
+                    <div class="grid grid-cols-1 gap-2 md:grid-cols-[10rem_minmax(0,1fr)_8rem_auto]">
                       <label class="text-xs">
                         <span class="ui-field-label">名称</span>
                         <Input
@@ -259,6 +281,19 @@
                           root-class="font-mono"
                           placeholder="http://user:password@host:port"
                           @update:model-value="node.url = $event.trim()"
+                        />
+                      </label>
+                      <label class="text-xs">
+                        <span class="ui-field-label">图片并发</span>
+                        <Input
+                          :model-value="String(node.image_concurrency_limit ?? 0)"
+                          block
+                          type="number"
+                          min="0"
+                          step="1"
+                          placeholder="默认 30，0 不限"
+                          title="限制该节点同时处理的图片请求数；超出后等待同组节点空位，不会改走直连。0 表示不限制。"
+                          @update:model-value="node.image_concurrency_limit = normalizeImageConcurrencyLimit($event)"
                         />
                       </label>
                       <div class="flex items-end gap-2">
@@ -280,7 +315,7 @@
                           size="xs"
                           variant="outline"
                           :disabled="!editingGroupId || !node.url || testingKey === `group:${editingGroupId}:${node.id}`"
-                          @click="testProxyGroupNode({ id: editingGroupId, name: groupForm.name, strategy: 'time_window', rotation_interval_minutes: groupForm.rotation_interval_minutes, enabled: groupForm.enabled, notes: groupForm.notes, nodes: groupForm.nodes }, node)"
+                          @click="testProxyGroupNode({ id: editingGroupId, name: groupForm.name }, node)"
                         >
                           {{ testingKey === `group:${editingGroupId}:${node.id}` ? '检测中...' : '检测' }}
                         </Button>
@@ -310,45 +345,57 @@
 <script setup lang="ts">
 import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
+import type { ActionMenuItem } from 'nanocat-ui'
 import { prepareSettingsForEdit, proxyApi, settingsApi } from '@/api'
-import type { ProxyGroup, ProxyNode, ProxyTestResult } from '@/api/proxy'
-import { ActionRow, FormSection, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, PanelHeader, ProxyNodeSummaryCard, StateBadge, StateBlock, TableShell } from '@/components/ai'
+import { parseProxyReference, serializeProxyReference, type ProxyGroup, type ProxyNode, type ProxyTestResult } from '@/api/proxy'
+import { ActionRow, FloatingActionMenu, FormSection, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, PanelHeader, ProxyNodeSummaryCard, StateBadge, StateBlock, TableShell, actionMenuGroups } from '@/components/ai'
+import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
 import type { Settings } from '@/types/api'
 
+type DefaultProxyMode = 'direct' | 'group' | 'custom'
+
 type ProxyGroupForm = {
   id: string
   name: string
-  rotation_interval_minutes: number
   enabled: boolean
   notes: string
   nodes: ProxyNode[]
 }
 
-const GLOBAL_TEST_KEY = '__global__'
+const DEFAULT_TEST_KEY = '__default__'
 const FORM_TEST_KEY = '__form__'
+const DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY = 30
 
 const settingsStore = useSettingsStore()
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
 
 const loading = ref(false)
-const savingGlobal = ref(false)
+const savingDefaultProxy = ref(false)
 const savingGroupId = ref('')
 const deletingGroupId = ref('')
 const testingKey = ref('')
 const groupKeyword = ref('')
 const showGroupModal = ref(false)
 const editingGroupId = ref('')
-const globalProxy = ref('')
+const defaultProxyMode = ref<DefaultProxyMode>('direct')
+const selectedDefaultProxyGroupId = ref('')
+const defaultCustomProxyInput = ref('')
 const currentSettings = ref<Settings | null>(null)
-const globalTestResult = ref<ProxyTestResult | null>(null)
+const defaultTestResult = ref<ProxyTestResult | null>(null)
 const groups = ref<ProxyGroup[]>([])
 const testResults = reactive<Record<string, ProxyTestResult>>({})
 const groupForm = reactive<ProxyGroupForm>(createDefaultGroupForm())
 let hasActivatedOnce = false
+
+const defaultProxyModeOptions = [
+  { label: '直连', value: 'direct' },
+  { label: '代理组', value: 'group' },
+  { label: '自定义代理', value: 'custom' },
+] as const
 
 const filteredGroups = computed(() => {
   const query = groupKeyword.value.trim().toLowerCase()
@@ -364,18 +411,49 @@ const filteredGroups = computed(() => {
   ].some((value) => String(value || '').toLowerCase().includes(query)))
 })
 
-const isGlobalProxyDirty = computed(() => {
+const defaultProxyGroupOptions = computed(() => {
+  const rows = groups.value.map((group) => ({
+    label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}${Array.isArray(group.nodes) ? ` · ${group.nodes.length} 个节点` : ''}`,
+    value: group.id,
+  }))
+  const selectedId = selectedDefaultProxyGroupId.value
+  if (selectedId && !rows.some((item) => item.value === selectedId)) {
+    rows.unshift({ label: `未知代理组 · ${selectedId}`, value: selectedId })
+  }
+  return [
+    { label: '选择代理组', value: '' },
+    ...rows,
+  ]
+})
+
+const defaultProxyPreview = computed(() => {
+  if (defaultProxyMode.value === 'direct') return '直连'
+  if (defaultProxyMode.value === 'group') {
+    const group = groups.value.find((item) => item.id === selectedDefaultProxyGroupId.value)
+    return selectedDefaultProxyGroupId.value ? `代理组：${group?.name || selectedDefaultProxyGroupId.value}` : '代理组：未选择'
+  }
+  return defaultCustomProxyInput.value || '自定义代理：未填写'
+})
+
+const canTestDefaultProxy = computed(() => {
+  if (defaultProxyMode.value === 'group') return Boolean(selectedDefaultProxyGroupId.value)
+  if (defaultProxyMode.value === 'custom') return Boolean(defaultCustomProxyInput.value.trim())
+  return false
+})
+
+const isDefaultProxyDirty = computed(() => {
   const settings = currentSettings.value
   if (!settings) return false
-  return globalProxy.value.trim() !== String(settings.basic?.proxy || settings.proxy || '').trim()
+  return normalizeDefaultProxyForCompare(defaultProxyValue()) !== normalizeDefaultProxyForCompare(defaultProxyFromSettings(settings))
 })
 
 function createDefaultNode(index = 0): ProxyNode {
   return {
-    id: `node-${index + 1}`,
-    name: `节点 ${index + 1}`,
+    id: createGeneratedId('node'),
+    name: `出口 ${index + 1}`,
     url: '',
     enabled: true,
+    image_concurrency_limit: DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY,
     notes: '',
   }
 }
@@ -384,7 +462,6 @@ function createDefaultGroupForm(): ProxyGroupForm {
   return {
     id: '',
     name: '',
-    rotation_interval_minutes: 5,
     enabled: true,
     notes: '',
     nodes: [createDefaultNode(0)],
@@ -403,19 +480,64 @@ function normalizeGroupId(value: string) {
   return normalizeReferenceId(value)
 }
 
-function normalizeRotationMinutes(value: unknown) {
+function proxyGroupReference(group: Pick<ProxyGroup, 'id'>) {
+  return serializeProxyReference('group', group.id)
+}
+
+async function copyText(value: string, message = '已复制') {
+  const text = String(value || '').trim()
+  if (!text) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const input = document.createElement('textarea')
+      input.value = text
+      input.setAttribute('readonly', 'readonly')
+      input.style.position = 'fixed'
+      input.style.opacity = '0'
+      document.body.appendChild(input)
+      input.select()
+      document.execCommand('copy')
+      document.body.removeChild(input)
+    }
+    toast.success(message)
+  } catch {
+    toast.error('复制失败')
+  }
+}
+
+function copyProxyGroupReference(group: Pick<ProxyGroup, 'id'>) {
+  void copyText(proxyGroupReference(group), '代理组引用已复制')
+}
+
+function createGeneratedId(prefix: string) {
+  let suffix = ''
+  try {
+    suffix = globalThis.crypto?.randomUUID?.().replace(/-/g, '').slice(0, 10) || ''
+  } catch {
+    suffix = ''
+  }
+  if (!suffix) {
+    suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`.slice(0, 10)
+  }
+  return `${prefix}-${suffix}`
+}
+
+function normalizeImageConcurrencyLimit(value: unknown) {
   const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return 5
-  return Math.max(0, Math.min(1440, Math.round(parsed * 100) / 100))
+  if (!Number.isFinite(parsed)) return 0
+  return Math.max(0, Math.min(10000, Math.floor(parsed)))
 }
 
 function normalizeGroupNode(item: ProxyNode, index: number): ProxyNode {
-  const id = normalizeGroupId(item.id || item.name || `node-${index + 1}`) || `node-${index + 1}`
+  const id = normalizeGroupId(item.id || '') || createGeneratedId('node')
   return {
     id,
-    name: String(item.name || id).trim(),
+    name: String(item.name || `出口 ${index + 1}`).trim(),
     url: String(item.url || '').trim(),
     enabled: item.enabled !== false,
+    image_concurrency_limit: normalizeImageConcurrencyLimit(item.image_concurrency_limit ?? DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY),
     last_latency_ms: Number(item.last_latency_ms || 0),
     fail_count: Number(item.fail_count || 0),
     last_error: String(item.last_error || '').trim(),
@@ -431,8 +553,8 @@ function normalizeGroup(item: ProxyGroup): ProxyGroup {
   return {
     id,
     name: String(item.name || item.id || '').trim(),
-    strategy: item.strategy || 'time_window',
-    rotation_interval_minutes: normalizeRotationMinutes(item.rotation_interval_minutes ?? 5),
+    strategy: item.strategy || 'request_random',
+    rotation_interval_minutes: 0,
     enabled: item.enabled !== false,
     notes: String(item.notes || '').trim(),
     nodes: Array.isArray(item.nodes)
@@ -450,6 +572,63 @@ function proxyActionError(action: string, error: unknown) {
   return message ? `${action}：${message}` : action
 }
 
+function defaultProxyFromSettings(settings: Settings) {
+  return String(settings.basic?.proxy || settings.proxy || '').trim()
+}
+
+function defaultProxyValue() {
+  if (defaultProxyMode.value === 'direct') return serializeProxyReference('direct')
+  if (defaultProxyMode.value === 'group') return serializeProxyReference('group', selectedDefaultProxyGroupId.value)
+  return serializeProxyReference('custom', defaultCustomProxyInput.value)
+}
+
+function normalizeDefaultProxyForCompare(value: unknown) {
+  const reference = parseProxyReference(value)
+  if (reference.mode === 'global' || reference.mode === 'direct') return 'direct'
+  if (reference.mode === 'group') return serializeProxyReference('group', reference.value)
+  if (reference.mode === 'profile') return String(value || '').trim()
+  return reference.value.trim()
+}
+
+function syncDefaultProxyControlsFromValue(value: unknown) {
+  const reference = parseProxyReference(value)
+  selectedDefaultProxyGroupId.value = ''
+  defaultCustomProxyInput.value = ''
+  defaultTestResult.value = null
+  if (reference.mode === 'group') {
+    defaultProxyMode.value = 'group'
+    selectedDefaultProxyGroupId.value = reference.value
+    return
+  }
+  if (reference.mode === 'custom' || reference.mode === 'profile') {
+    defaultProxyMode.value = 'custom'
+    defaultCustomProxyInput.value = reference.mode === 'profile' ? String(value || '').trim() : reference.value
+    return
+  }
+  defaultProxyMode.value = 'direct'
+}
+
+function setDefaultProxyMode(mode: string | string[]) {
+  const value = Array.isArray(mode) ? mode[0] : mode
+  defaultProxyMode.value = ['direct', 'group', 'custom'].includes(value)
+    ? value as DefaultProxyMode
+    : 'direct'
+  defaultTestResult.value = null
+}
+
+function selectDefaultProxyGroup(groupId: string | string[]) {
+  const value = Array.isArray(groupId) ? groupId[0] : groupId
+  selectedDefaultProxyGroupId.value = String(value || '').trim()
+  defaultProxyMode.value = 'group'
+  defaultTestResult.value = null
+}
+
+function setDefaultCustomProxyInput(value: string) {
+  defaultCustomProxyInput.value = String(value || '').trim()
+  defaultProxyMode.value = 'custom'
+  defaultTestResult.value = null
+}
+
 async function loadData() {
   loading.value = true
   try {
@@ -459,9 +638,8 @@ async function loadData() {
     ])
     currentSettings.value = prepareSettingsForEdit(settings)
     settingsStore.$patch({ settings })
-    globalProxy.value = String(settings.basic?.proxy || settings.proxy || '').trim()
-    globalTestResult.value = null
     updateGroups(groupResponse.groups || [])
+    syncDefaultProxyControlsFromValue(defaultProxyFromSettings(settings))
   } catch (error: any) {
     toast.error(error.message || '加载代理配置失败')
   } finally {
@@ -469,68 +647,103 @@ async function loadData() {
   }
 }
 
-async function saveGlobalProxy() {
+async function saveDefaultProxy() {
   if (!currentSettings.value) {
     toast.warning('配置尚未加载完成')
     return
   }
+  if (defaultProxyMode.value === 'group' && !selectedDefaultProxyGroupId.value) {
+    toast.warning('请选择默认代理组')
+    return
+  }
+  if (defaultProxyMode.value === 'custom' && !defaultCustomProxyInput.value.trim()) {
+    toast.warning('请填写自定义代理 URL')
+    return
+  }
   const confirmed = await confirmDialog.ask({
-    title: '确认保存全局代理',
-    message: '即将保存全局代理配置。未单独指定代理的账号后续请求会受到影响，是否继续？',
+    title: '确认保存默认代理',
+    message: '即将保存默认代理配置。未单独指定代理的账号会按账号组代理、默认代理顺序回退，是否继续？',
     confirmText: '保存',
     cancelText: '取消',
   })
   if (!confirmed) return
 
-  savingGlobal.value = true
+  savingDefaultProxy.value = true
   try {
     const next = prepareSettingsForEdit(currentSettings.value)
-    next.proxy = globalProxy.value.trim()
+    next.proxy = defaultProxyValue()
     const response = await settingsStore.updateSettingsPatch({
       proxy: next.proxy,
     })
     currentSettings.value = prepareSettingsForEdit(response.config || next)
-    toast.success('全局代理已保存')
+    syncDefaultProxyControlsFromValue(defaultProxyFromSettings(currentSettings.value))
+    toast.success('默认代理已保存')
   } catch (error: any) {
-    toast.error(proxyActionError('保存全局代理失败', error))
+    toast.error(proxyActionError('保存默认代理失败', error))
   } finally {
-    savingGlobal.value = false
+    savingDefaultProxy.value = false
   }
 }
 
-function clearGlobalProxy() {
-  globalProxy.value = ''
-  globalTestResult.value = null
+function setDefaultProxyDirect() {
+  defaultProxyMode.value = 'direct'
+  selectedDefaultProxyGroupId.value = ''
+  defaultCustomProxyInput.value = ''
+  defaultTestResult.value = null
 }
 
-async function testGlobalProxy() {
-  const url = globalProxy.value.trim()
-  if (!url) {
-    toast.warning('请先填写全局代理 URL')
+async function testDefaultProxy() {
+  if (defaultProxyMode.value === 'direct') {
+    toast.info('直连模式无需测试代理')
+    return
+  }
+  if (defaultProxyMode.value === 'group' && !selectedDefaultProxyGroupId.value) {
+    toast.warning('请选择默认代理组')
+    return
+  }
+  if (defaultProxyMode.value === 'custom' && !defaultCustomProxyInput.value.trim()) {
+    toast.warning('请先填写自定义代理 URL')
     return
   }
   const confirmed = await confirmDialog.ask({
-    title: '确认测试全局代理',
-    message: '即将使用全局代理地址发起外部网络测试请求。请确认当前允许测试该代理连接。',
+    title: '确认测试默认代理',
+    message: '即将使用当前默认代理发起外部网络测试请求。请确认当前允许测试该代理连接。',
     confirmText: '开始测试',
     cancelText: '取消',
   })
   if (!confirmed) return
 
-  testingKey.value = GLOBAL_TEST_KEY
+  testingKey.value = DEFAULT_TEST_KEY
   try {
-    const response = await proxyApi.test(url)
-    globalTestResult.value = response.result
-    if (response.result.ok) toast.success(`全局代理可用，耗时 ${response.result.latency_ms}ms`)
-    else toast.warning(response.result.error || '全局代理测试失败')
+    if (defaultProxyMode.value === 'group') {
+      const response = await proxyApi.testGroup({ id: selectedDefaultProxyGroupId.value })
+      if (response.groups) updateGroups(response.groups)
+      const results = response.results || []
+      const failed = results.filter((item) => !item.result.ok)
+      const firstResult = results[0]?.result
+      const maxLatency = results.reduce((max, item) => Math.max(max, Number(item.result.latency_ms || 0)), 0)
+      defaultTestResult.value = {
+        ok: results.length > 0 && failed.length === 0,
+        status: firstResult?.status || 0,
+        latency_ms: maxLatency,
+        error: failed.length ? `代理组检测完成，失败 ${failed.length} 个节点` : null,
+      }
+      if (defaultTestResult.value.ok) toast.success(`默认代理组可用，共 ${results.length} 个节点`)
+      else toast.warning(defaultTestResult.value.error || '默认代理组测试失败')
+      return
+    }
+    const response = await proxyApi.test(defaultCustomProxyInput.value.trim())
+    defaultTestResult.value = response.result
+    if (response.result.ok) toast.success(`默认代理可用，耗时 ${response.result.latency_ms}ms`)
+    else toast.warning(response.result.error || '默认代理测试失败')
   } catch (error: any) {
-    globalTestResult.value = {
+    defaultTestResult.value = {
       ok: false,
       status: 0,
       latency_ms: 0,
-      error: error.message || '全局代理测试失败',
+      error: error.message || '默认代理测试失败',
     }
-    toast.error(error.message || '全局代理测试失败')
+    toast.error(error.message || '默认代理测试失败')
   } finally {
     testingKey.value = ''
   }
@@ -551,7 +764,6 @@ function openEditGroupModal(group: ProxyGroup) {
   Object.assign(groupForm, {
     id: group.id,
     name: group.name || group.id,
-    rotation_interval_minutes: normalizeRotationMinutes(group.rotation_interval_minutes ?? 5),
     enabled: group.enabled !== false,
     notes: group.notes || '',
     nodes: group.nodes.length ? group.nodes.map((node, index) => normalizeGroupNode(node, index)) : [createDefaultNode(0)],
@@ -578,11 +790,12 @@ function removeGroupNode(index: number) {
 }
 
 async function saveProxyGroup() {
-  const id = normalizeGroupId(groupForm.id || groupForm.name)
-  if (!id) {
-    toast.warning('请填写代理组 ID 或显示名称')
+  const groupName = groupForm.name.trim()
+  if (!groupName) {
+    toast.warning('请填写代理组名称')
     return
   }
+  const id = normalizeGroupId(editingGroupId.value || groupForm.id) || createGeneratedId('pg')
   const nodes = groupForm.nodes
     .map((node, index) => normalizeGroupNode(node, index))
     .filter((node) => node.url)
@@ -596,9 +809,8 @@ async function saveProxyGroup() {
     const wasEditing = Boolean(editingGroupId.value)
     const response = await proxyApi.saveGroup({
       id,
-      name: groupForm.name.trim() || id,
-      strategy: 'time_window',
-      rotation_interval_minutes: normalizeRotationMinutes(groupForm.rotation_interval_minutes),
+      name: groupName,
+      strategy: 'request_random',
       enabled: groupForm.enabled,
       notes: groupForm.notes.trim(),
       nodes,
@@ -661,7 +873,43 @@ async function deleteProxyGroup(group: ProxyGroup) {
   }
 }
 
-async function testProxyGroupNode(group: ProxyGroup, node: ProxyNode) {
+function proxyGroupActionItems(group: ProxyGroup): ActionMenuItem[] {
+  const allKey = `group:${group.id}:all`
+  return actionMenuGroups(
+    [
+      {
+        key: 'test-all',
+        label: testingKey.value === allKey ? '检测中...' : '检测全部节点',
+        disabled: testingKey.value === allKey || group.nodes.length === 0,
+      },
+    ],
+    [
+      {
+        key: 'toggle-enabled',
+        label: savingGroupId.value === group.id
+          ? '处理中...'
+          : group.enabled ? '停用代理组' : '启用代理组',
+        disabled: savingGroupId.value === group.id,
+      },
+    ],
+    [
+      {
+        key: 'delete',
+        label: deletingGroupId.value === group.id ? '删除中...' : '删除代理组',
+        danger: true,
+        disabled: deletingGroupId.value === group.id,
+      },
+    ],
+  )
+}
+
+function handleProxyGroupAction(group: ProxyGroup, action: string) {
+  if (action === 'test-all') void testProxyGroupAll(group)
+  if (action === 'toggle-enabled') void toggleProxyGroup(group)
+  if (action === 'delete') void deleteProxyGroup(group)
+}
+
+async function testProxyGroupNode(group: Pick<ProxyGroup, 'id' | 'name'>, node: ProxyNode) {
   const confirmed = await confirmDialog.ask({
     title: '确认测试代理节点',
     message: `即将使用代理组 ${group.name || group.id} 的节点 ${node.name || node.id} 发起外部网络测试请求。请确认当前允许测试该代理连接。`,
@@ -706,9 +954,15 @@ async function testProxyGroupAll(group: ProxyGroup) {
   try {
     const response = await proxyApi.testGroup({ id: group.id })
     if (response.groups) updateGroups(response.groups)
-    const failed = (response.results || []).filter((item) => !item.result.ok)
+    const results = response.results || []
+    for (const item of results) {
+      if (item.node_id && item.result) {
+        testResults[`group:${group.id}:${item.node_id}`] = item.result
+      }
+    }
+    const failed = results.filter((item) => !item.result.ok)
     if (failed.length) toast.warning(`代理组检测完成，失败 ${failed.length} 个节点`)
-    else toast.success(`代理组检测通过，共 ${response.results?.length || 0} 个节点`)
+    else toast.success(`代理组检测通过，共 ${results.length} 个节点`)
   } catch (error: any) {
     toast.error(error.message || '代理组检测失败')
   } finally {
@@ -717,6 +971,7 @@ async function testProxyGroupAll(group: ProxyGroup) {
 }
 
 function nodeTestSummary(group: ProxyGroup, node: ProxyNode) {
+  if (testingKey.value === `group:${group.id}:all` || testingKey.value === `group:${group.id}:${node.id}`) return '检测中...'
   const result = testResults[`group:${group.id}:${node.id}`]
   if (result?.ok) return `HTTP ${result.status || '-'} · ${result.latency_ms || 0}ms`
   if (result && !result.ok) return result.error || '检测失败'
@@ -726,26 +981,12 @@ function nodeTestSummary(group: ProxyGroup, node: ProxyNode) {
 }
 
 function nodeTestClass(group: ProxyGroup, node: ProxyNode) {
+  if (testingKey.value === `group:${group.id}:all` || testingKey.value === `group:${group.id}:${node.id}`) return 'text-sky-600'
   const result = testResults[`group:${group.id}:${node.id}`]
   if (result) return result.ok ? 'text-emerald-600' : 'text-rose-600'
   if (node.last_error) return 'text-rose-600'
   if (node.last_checked_at) return 'text-emerald-600'
   return 'text-muted-foreground'
-}
-
-function groupRotationSummary(group: ProxyGroup) {
-  const minutes = normalizeRotationMinutes(group.rotation_interval_minutes ?? 5)
-  if (minutes <= 0) return '每次新请求轮询'
-  return `每 ${minutes} 分钟轮换`
-}
-
-async function copyGroupReference(id: string) {
-  try {
-    await navigator.clipboard.writeText(`group:${id}`)
-    toast.success('代理组引用已复制')
-  } catch {
-    toast.warning('复制失败，请手动复制')
-  }
 }
 
 onMounted(() => {
@@ -757,7 +998,7 @@ onActivated(() => {
     hasActivatedOnce = true
     return
   }
-  if (showGroupModal.value || savingGlobal.value || savingGroupId.value || testingKey.value || isGlobalProxyDirty.value) return
+  if (showGroupModal.value || savingDefaultProxy.value || savingGroupId.value || testingKey.value || isDefaultProxyDirty.value) return
   void loadData()
 })
 </script>

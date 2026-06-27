@@ -732,7 +732,7 @@ const registerModeOptions = [
 ]
 const registerModeGroups = [{ options: registerModeOptions }]
 const registerProxyModeOptions = [
-  { value: 'global', label: '使用全局代理' },
+  { value: 'global', label: '使用默认代理' },
   { value: 'direct', label: '直连' },
   { value: 'group', label: '代理组' },
   { value: 'custom', label: '自定义代理' },
@@ -812,10 +812,10 @@ const registerProxyGroupOptions = computed(() => {
 })
 const registerProxyGroupGroups = computed(() => [{ options: registerProxyGroupOptions.value }])
 const registerProxyHint = computed(() => {
-  if (registerProxyMode.value === 'direct') return '本次注册任务强制直连，不读取全局代理。'
-  if (registerProxyMode.value === 'group') return '注册任务会使用所选代理组；代理组为空时不会偷偷回退到全局代理。'
+  if (registerProxyMode.value === 'direct') return '本次注册任务强制直连，不读取默认代理。'
+  if (registerProxyMode.value === 'group') return '注册任务会使用所选代理组；代理组为空时不会偷偷回退到默认代理。'
   if (registerProxyMode.value === 'custom') return '仅本注册任务使用该代理地址。'
-  return '默认使用系统设置里的全局代理；全局未配置时直连。'
+  return '默认使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
 })
 const enabledProviderCount = computed(() => registerProviders.value.filter(provider => provider.enable !== false).length)
 const enabledProviderIssueCount = computed(() =>
