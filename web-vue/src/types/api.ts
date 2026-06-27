@@ -33,6 +33,7 @@ export interface ProxyRuntimeStatus {
   egress_mode: string
   proxy_source?: string
   has_proxy: boolean
+  skip_ssl_verify?: boolean
   clearance_enabled: boolean
   clearance_mode: string
   has_clearance_bundle: boolean

@@ -322,7 +322,7 @@ class ProxySettingsStore:
             resource=bool(resource),
             runtime_enabled=runtime_enabled,
             egress_mode=egress_mode,
-            skip_ssl_verify=bool(runtime.get("skip_ssl_verify")) if runtime_enabled else False,
+            skip_ssl_verify=bool(runtime.get("skip_ssl_verify")),
             reset_session_status_codes=_status_codes_tuple(runtime.get("reset_session_status_codes")),
             clearance=clearance,
         )
@@ -338,7 +338,7 @@ class ProxySettingsStore:
         profile = self.get_profile(account=account, proxy=proxy, resource=resource, upstream=upstream)
         if profile.proxy_url:
             session_kwargs["proxy"] = profile.proxy_url
-        if profile.runtime_enabled and profile.skip_ssl_verify:
+        if profile.skip_ssl_verify:
             session_kwargs["verify"] = False
         return session_kwargs
 
@@ -349,7 +349,7 @@ class ProxySettingsStore:
     ) -> dict[str, object]:
         if profile.proxy_url:
             session_kwargs["proxy"] = profile.proxy_url
-        if profile.runtime_enabled and profile.skip_ssl_verify:
+        if profile.skip_ssl_verify:
             session_kwargs["verify"] = False
         return session_kwargs
 
@@ -470,11 +470,15 @@ class ProxySettingsStore:
             "egress_label": profile.egress_label,
             "image_concurrency_limit": profile.image_concurrency_limit,
             "has_proxy": bool(profile.proxy_url),
+            "skip_ssl_verify": profile.skip_ssl_verify,
             "clearance_enabled": profile.clearance_enabled,
             "clearance_mode": profile.clearance_mode,
             "has_clearance_bundle": cached_count > 0,
             "cached_clearance_hosts": sorted(set(cached_hosts)),
         }
+
+    def should_skip_ssl_verify(self) -> bool:
+        return bool(self._get_runtime_settings().get("skip_ssl_verify"))
 
     def acquire_image_egress(self, profile: ProxyRuntimeProfile) -> int:
         if bool(getattr(profile, "image_egress_reserved", False)):
@@ -899,7 +903,7 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
             "error": "invalid proxy url",
             **result_base,
         }
-    session = Session(impersonate="edge101", verify=True, proxy=candidate)
+    session = Session(impersonate="edge101", verify=not proxy_settings.should_skip_ssl_verify(), proxy=candidate)
     started = time.perf_counter()
     try:
         response = session.get(
