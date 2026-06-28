@@ -824,11 +824,30 @@ async function openApiInfo() {
 }
 
 async function copyText(value: string) {
-  if (!value) return
+  const text = String(value || '').trim()
+  if (!text) return
   try {
-    await navigator.clipboard.writeText(value)
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const input = document.createElement('textarea')
+      input.value = text
+      input.setAttribute('readonly', 'readonly')
+      input.style.position = 'fixed'
+      input.style.left = '-9999px'
+      input.style.top = '0'
+      document.body.appendChild(input)
+      input.focus()
+      input.select()
+      input.setSelectionRange(0, input.value.length)
+      const copied = document.execCommand('copy')
+      document.body.removeChild(input)
+      if (!copied) throw new Error('execCommand copy failed')
+    }
+    toast.success('已复制')
   } catch (error) {
     console.error('Copy failed', error)
+    toast.error('复制失败，请手动复制')
   }
 }
 
