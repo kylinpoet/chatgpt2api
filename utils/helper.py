@@ -3,6 +3,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -245,19 +246,54 @@ def anthropic_sse_stream(items) -> Iterator[str]:
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
 
+def _format_timeout_secs(value: float) -> str:
+    if value >= 10:
+        return f"{value:.0f}s"
+    if value >= 1:
+        return f"{value:.1f}s"
+    return f"{value:.3f}s"
+
+
 def iter_sse_payloads(response: requests.Response, max_duration_secs: float | None = None) -> Iterator[str]:
     started_at = time.monotonic()
-    for raw_line in response.iter_lines():
-        if max_duration_secs and time.monotonic() - started_at > max_duration_secs:
-            raise TimeoutError(f"SSE stream exceeded {max_duration_secs:.0f}s")
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if payload:
-            yield payload
+    timeout_secs = float(max_duration_secs or 0)
+    timed_out = False
+    timer: threading.Timer | None = None
+
+    def _abort_stream() -> None:
+        nonlocal timed_out
+        timed_out = True
+        try:
+            response.close()
+        except Exception:
+            pass
+
+    if timeout_secs > 0:
+        timer = threading.Timer(timeout_secs, _abort_stream)
+        timer.daemon = True
+        timer.start()
+
+    try:
+        for raw_line in response.iter_lines():
+            if timeout_secs > 0 and (timed_out or time.monotonic() - started_at > timeout_secs):
+                raise TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload:
+                yield payload
+        if timed_out and timeout_secs > 0:
+            raise TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
+    except Exception as exc:
+        if timed_out and timeout_secs > 0 and not isinstance(exc, TimeoutError):
+            raise TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}") from exc
+        raise
+    finally:
+        if timer is not None:
+            timer.cancel()
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:

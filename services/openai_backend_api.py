@@ -4,6 +4,7 @@ import mimetypes
 import os
 import random
 import re
+import threading
 import time
 
 import urllib.error
@@ -812,36 +813,96 @@ class OpenAIBackendAPI:
         })
 
     @staticmethod
-    def _iter_codex_response_events(raw: Any) -> Iterator[Dict[str, Any]]:
+    def _stream_timeout_message(timeout_secs: float) -> str:
+        return f"SSE stream exceeded {timeout_secs:.0f}s" if timeout_secs >= 1 else f"SSE stream exceeded {timeout_secs:.3f}s"
+
+    @staticmethod
+    def _iter_codex_response_events(raw: Any, max_duration_secs: float | None = None) -> Iterator[Dict[str, Any]]:
         content_type = str(raw.headers.get("content-type") or "").lower()
-        text = raw.read().decode("utf-8", "replace")
         status_code = getattr(raw, "status", None)
+        timeout_secs = float(max_duration_secs or 0)
+        started_at = time.monotonic()
+        timed_out = False
+        timer: threading.Timer | None = None
         parse_errors: list[str] = []
         events: list[Dict[str, Any]] = []
-        if "application/json" in content_type:
+        body_parts: list[str] = []
+        body_preview_len = 0
+
+        def _abort_stream() -> None:
+            nonlocal timed_out
+            timed_out = True
             try:
-                data = json.loads(text)
-                if isinstance(data, dict):
-                    events.append(data)
+                raw.close()
+            except Exception:
+                pass
+
+        def _raise_if_timeout() -> None:
+            if timeout_secs > 0 and (timed_out or time.monotonic() - started_at > timeout_secs):
+                raise TimeoutError(OpenAIBackendAPI._stream_timeout_message(timeout_secs))
+
+        def _append_body(text: str) -> None:
+            nonlocal body_preview_len
+            if body_preview_len >= 4000:
+                return
+            chunk = text[: max(0, 4000 - body_preview_len)]
+            body_parts.append(chunk)
+            body_preview_len += len(chunk)
+
+        def _flush_sse_event(lines: list[str]) -> None:
+            if not lines:
+                return
+            payload_text = "\n".join(lines).strip()
+            lines.clear()
+            if not payload_text or payload_text == "[DONE]":
+                return
+            try:
+                data = json.loads(payload_text)
             except Exception as exc:
                 parse_errors.append(str(exc))
-        else:
-            lines: list[str] = []
-            for line in text.splitlines() + [""]:
-                if not line:
-                    if lines:
-                        payload_text = "\n".join(lines).strip()
-                        if payload_text and payload_text != "[DONE]":
-                            try:
-                                data = json.loads(payload_text)
-                            except Exception as exc:
-                                parse_errors.append(str(exc))
-                                data = None
-                            if isinstance(data, dict):
-                                events.append(data)
-                        lines = []
-                elif line.startswith("data:"):
-                    lines.append(line[5:].lstrip())
+                return
+            if isinstance(data, dict):
+                events.append(data)
+
+        if timeout_secs > 0:
+            timer = threading.Timer(timeout_secs, _abort_stream)
+            timer.daemon = True
+            timer.start()
+        try:
+            if "application/json" in content_type:
+                _raise_if_timeout()
+                text = raw.read().decode("utf-8", "replace")
+                _raise_if_timeout()
+                _append_body(text)
+                try:
+                    data = json.loads(text)
+                    if isinstance(data, dict):
+                        events.append(data)
+                except Exception as exc:
+                    parse_errors.append(str(exc))
+            else:
+                lines: list[str] = []
+                while True:
+                    _raise_if_timeout()
+                    raw_line = raw.readline()
+                    _raise_if_timeout()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+                    _append_body(line + "\n")
+                    if not line:
+                        _flush_sse_event(lines)
+                    elif line.startswith("data:"):
+                        lines.append(line[5:].lstrip())
+                _flush_sse_event(lines)
+                _raise_if_timeout()
+        except Exception as exc:
+            if timed_out and timeout_secs > 0 and not isinstance(exc, TimeoutError):
+                raise TimeoutError(OpenAIBackendAPI._stream_timeout_message(timeout_secs)) from exc
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
 
         event_types: Dict[str, int] = {}
         image_result_lengths: list[int] = []
@@ -853,7 +914,7 @@ class OpenAIBackendAPI:
             "event": "codex_responses_response_debug",
             "status_code": status_code,
             "content_type": content_type,
-            "response_text_len": len(text),
+            "response_text_len": body_preview_len,
             "event_count": len(events),
             "event_types": event_types,
             "image_result_lengths": image_result_lengths[:10],
@@ -864,7 +925,7 @@ class OpenAIBackendAPI:
                 OpenAIBackendAPI._codex_body_preview(event, 1500)
                 for event in events[:10]
             ] if not image_result_lengths else [],
-            "body_preview": text[:1000] if not events else "",
+            "body_preview": "".join(body_parts)[:1000] if not events else "",
         })
         for event in events:
             yield event
@@ -911,7 +972,7 @@ class OpenAIBackendAPI:
             "event": "codex_responses_request_debug",
             "url": self.base_url + path,
             "transport": "urllib.request",
-            "timeout_secs": 1200,
+            "timeout_secs": config.image_stream_timeout_secs,
             "account_email": str(account.get("email") or "").strip(),
             "source_type": str(account.get("source_type") or "").strip(),
             "account_type": str(account.get("type") or "").strip(),
@@ -943,9 +1004,10 @@ class OpenAIBackendAPI:
                 if key.lower() != "authorization"
             },
         })
+        stream_timeout = config.image_stream_timeout_secs
         try:
-            with urllib.request.urlopen(request, timeout=1200) as raw:
-                yield from self._iter_codex_response_events(raw)
+            with urllib.request.urlopen(request, timeout=stream_timeout) as raw:
+                yield from self._iter_codex_response_events(raw, max_duration_secs=stream_timeout)
         except urllib.error.HTTPError as error:
             body_text = error.read().decode("utf-8", "replace")
             body: Any = body_text
@@ -2596,7 +2658,7 @@ class OpenAIBackendAPI:
                 # 而非 ImagePollTimeoutError，让调用方能区分真正的超时和上游拒绝
                 task_error = getattr(exc, "task_error", "")
                 if not file_ids and not sediment_ids:
-                    if task_error:
+                    if task_error and _is_content_policy_error(task_error):
                         raise ImageContentPolicyError(task_error) from exc
                     raise
                 logger.warning({
