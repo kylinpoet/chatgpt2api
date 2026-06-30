@@ -1218,6 +1218,7 @@ def _recover_image_conversation_id(
         *,
         reason: str,
         message: str = "",
+        started_at: float | None = None,
 ) -> str:
     """从最近对话中补救 conversation_id；只做一次，失败不影响主流程。"""
     if not request.prompt:
@@ -1225,7 +1226,7 @@ def _recover_image_conversation_id(
     try:
         recovered_id = backend.find_conversation_by_prompt(
             request.prompt,
-            time.time(),
+            started_at or time.time(),
             timeout_secs=5.0,
         )
         if recovered_id:
@@ -1243,6 +1244,227 @@ def _recover_image_conversation_id(
             "error": repr(exc)[:300],
         })
     return ""
+
+
+def _image_stream_timeout_task_diagnostics(
+        backend: OpenAIBackendAPI,
+        conversation_id: str,
+) -> tuple[str, list[dict[str, Any]], str]:
+    """Collect a small task summary after an upstream SSE timeout."""
+    try:
+        tasks = backend._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
+    except Exception as exc:
+        return "", [], diagnostic_excerpt(repr(exc), 1000)
+
+    summaries: list[dict[str, Any]] = []
+    first_error = ""
+    for task in tasks[:5]:
+        if not isinstance(task, dict):
+            continue
+        is_error, error_msg, metadata = backend.check_task_error(task)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if error_msg and not first_error:
+            first_error = error_msg
+        summary: dict[str, Any] = {
+            "id": str(task.get("id") or task.get("task_id") or "")[:80],
+            "status": str(task.get("status") or metadata.get("status") or "")[:80],
+            "type": str(task.get("type") or metadata.get("async_task_type") or "")[:80],
+            "is_error": bool(is_error or metadata.get("is_error")),
+        }
+        for key in ("conversation_id", "original_conversation_id"):
+            value = task.get(key)
+            if value not in (None, ""):
+                summary[key] = str(value)[:80]
+        if error_msg:
+            summary["error_preview"] = diagnostic_excerpt(error_msg, 500)
+        summaries.append({key: value for key, value in summary.items() if value not in (None, "")})
+    return first_error, summaries, ""
+
+
+def _image_stream_timeout_error(
+        raw_error: str,
+        conversation_id: str,
+        upstream_error: str,
+        raw_upstream_message: str,
+        followup: dict[str, Any],
+        conversation_snapshot: dict[str, Any] | None = None,
+) -> ImageGenerationError:
+    exc = ImageGenerationError(
+        image_stream_error_message(raw_error),
+        status_code=502,
+        error_type="server_error",
+        code="image_stream_timeout",
+        conversation_id=conversation_id,
+        raw_error=raw_error,
+        upstream_error=diagnostic_excerpt(upstream_error or raw_error, 4000),
+        raw_upstream_message=diagnostic_excerpt(raw_upstream_message, 4000),
+    )
+    setattr(exc, "stream_timeout_secs", config.image_stream_timeout_secs)
+    setattr(exc, "stream_timeout_followup", followup)
+    if followup.get("task_error"):
+        setattr(exc, "last_task_error", followup["task_error"])
+    if conversation_snapshot:
+        setattr(exc, "last_conversation_snapshot", conversation_snapshot)
+    if raw_upstream_message:
+        setattr(exc, "upstream_message_preview", diagnostic_excerpt(raw_upstream_message, 1000))
+    return exc
+
+
+def _recover_after_image_stream_timeout(
+        backend: OpenAIBackendAPI,
+        request: ConversationRequest,
+        last: dict[str, Any],
+        timeout_error: Exception,
+        index: int,
+        total: int,
+        stream_started_at: float,
+) -> ImageOutput:
+    raw_error = str(timeout_error) or f"SSE stream exceeded {config.image_stream_timeout_secs}s"
+    conversation_id = str(last.get("conversation_id") or "")
+    file_ids = [str(item) for item in last.get("file_ids") or []]
+    sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
+    message = str(last.get("text") or "").strip()
+
+    if not conversation_id:
+        conversation_id = _recover_image_conversation_id(
+            backend,
+            request,
+            reason="stream_timeout",
+            message=message or raw_error,
+            started_at=stream_started_at,
+        )
+
+    followup: dict[str, Any] = {
+        "reason": "sse_timeout",
+        "timeout_secs": config.image_stream_timeout_secs,
+        "conversation_id": conversation_id,
+        "stream_error": raw_error,
+        "last_stream_state": {
+            "conversation_id": str(last.get("conversation_id") or ""),
+            "file_ids": file_ids,
+            "sediment_ids": sediment_ids,
+            "blocked": bool(last.get("blocked")),
+            "tool_invoked": last.get("tool_invoked"),
+            "turn_use_case": str(last.get("turn_use_case") or ""),
+            "text_preview": diagnostic_excerpt(message, 1000),
+        },
+    }
+    task_error = ""
+    task_summaries: list[dict[str, Any]] = []
+    task_probe_error = ""
+    conversation_snapshot: dict[str, Any] = {}
+    latest_assistant_text = ""
+    policy_message = ""
+    conversation_probe_error = ""
+
+    if conversation_id:
+        task_error, task_summaries, task_probe_error = _image_stream_timeout_task_diagnostics(backend, conversation_id)
+        try:
+            conversation = backend._get_conversation(conversation_id, timeout_secs=10)
+            conversation_snapshot, latest_assistant_text = backend._conversation_poll_snapshot(conversation)
+            for record in backend._extract_image_tool_records(conversation):
+                add_unique(file_ids, [str(item) for item in record.get("file_ids") or []])
+                add_unique(sediment_ids, [str(item) for item in record.get("sediment_ids") or []])
+            policy_message = backend._find_content_policy_error_in_conversation(conversation)
+        except Exception as exc:
+            conversation_probe_error = diagnostic_excerpt(repr(exc), 1000)
+
+    followup.update({
+        "task_error": diagnostic_excerpt(task_error, 2000),
+        "task_count": len(task_summaries),
+        "tasks": task_summaries,
+        "task_probe_error": task_probe_error,
+        "conversation_probe_error": conversation_probe_error,
+        "conversation_message_count": len(conversation_snapshot.get("messages") or []) if conversation_snapshot else 0,
+        "latest_assistant_text": diagnostic_excerpt(latest_assistant_text, 2000),
+        "policy_message": diagnostic_excerpt(policy_message, 2000),
+        "recovered_file_ids": file_ids,
+        "recovered_sediment_ids": sediment_ids,
+    })
+
+    policy_error = policy_message or (task_error if task_error and _is_content_policy_image_message(task_error) else "")
+    if policy_error:
+        policy_exc = ImageGenerationError(
+            policy_error,
+            status_code=400,
+            error_type="invalid_request_error",
+            code="content_policy_violation",
+            conversation_id=conversation_id,
+            raw_error=raw_error,
+            upstream_error=policy_error,
+            raw_upstream_message=policy_error,
+        )
+        setattr(policy_exc, "stream_timeout_secs", config.image_stream_timeout_secs)
+        setattr(policy_exc, "stream_timeout_followup", followup)
+        if conversation_snapshot:
+            setattr(policy_exc, "last_conversation_snapshot", conversation_snapshot)
+        raise policy_exc
+
+    if file_ids or sediment_ids:
+        try:
+            image_urls = _resolve_image_urls_with_monitor(
+                backend,
+                request,
+                conversation_id,
+                file_ids,
+                sediment_ids,
+                index=index,
+                total=total,
+                path="stream_timeout_followup",
+                poll=False,
+            )
+            result_output = _image_result_output_from_urls(
+                backend,
+                request,
+                conversation_id,
+                image_urls,
+                index,
+                total,
+                path="stream_timeout_followup",
+            )
+            if result_output:
+                logger.info({
+                    "event": "image_stream_timeout_recovered_result",
+                    "call_id": request.call_id,
+                    "conversation_id": conversation_id,
+                    "file_ids": file_ids,
+                    "sediment_ids": sediment_ids,
+                    "url_count": len(image_urls),
+                })
+                return result_output
+        except Exception as exc:
+            followup["result_recovery_error"] = diagnostic_excerpt(repr(exc), 1000)
+
+    upstream_error = task_error or policy_message
+    if not upstream_error:
+        upstream_error = json.dumps(
+            {
+                key: value
+                for key, value in followup.items()
+                if key not in {"conversation_snapshot"}
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    logger.warning({
+        "event": "image_stream_timeout_followup",
+        "call_id": request.call_id,
+        "conversation_id": conversation_id,
+        "task_error": diagnostic_excerpt(task_error, 500),
+        "task_count": len(task_summaries),
+        "file_ids": file_ids,
+        "sediment_ids": sediment_ids,
+        "conversation_probe_error": conversation_probe_error,
+        "task_probe_error": task_probe_error,
+    })
+    raise _image_stream_timeout_error(
+        raw_error,
+        conversation_id,
+        upstream_error,
+        latest_assistant_text or message,
+        followup,
+        conversation_snapshot,
+    )
 
 
 def _image_result_output_from_urls(
@@ -1304,35 +1526,48 @@ def stream_image_outputs(
     """
     last: dict[str, Any] = {}
     conversation_stream_started = time.perf_counter()
-    for event in conversation_events(
+    conversation_wall_started = time.time()
+    try:
+        for event in conversation_events(
+                backend,
+                prompt=request.prompt,
+                model=request.model,
+                images=request.images or [],
+                size=request.size,
+                quality=request.quality,
+        ):
+            last = event
+            if event.get("type") == "conversation.delta":
+                yield ImageOutput(
+                    kind="progress",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    text=str(event.get("delta") or ""),
+                    upstream_event_type="conversation.delta",
+                )
+                continue
+            if event.get("type") == "conversation.event":
+                raw = event.get("raw")
+                raw_type = str(raw.get("type") or "") if isinstance(raw, dict) else ""
+                yield ImageOutput(
+                    kind="progress",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    upstream_event_type=raw_type,
+                )
+    except TimeoutError as exc:
+        yield _recover_after_image_stream_timeout(
             backend,
-            prompt=request.prompt,
-            model=request.model,
-            images=request.images or [],
-            size=request.size,
-            quality=request.quality,
-    ):
-        last = event
-        if event.get("type") == "conversation.delta":
-            yield ImageOutput(
-                kind="progress",
-                model=request.model,
-                index=index,
-                total=total,
-                text=str(event.get("delta") or ""),
-                upstream_event_type="conversation.delta",
-            )
-            continue
-        if event.get("type") == "conversation.event":
-            raw = event.get("raw")
-            raw_type = str(raw.get("type") or "") if isinstance(raw, dict) else ""
-            yield ImageOutput(
-                kind="progress",
-                model=request.model,
-                index=index,
-                total=total,
-                upstream_event_type=raw_type,
-            )
+            request,
+            last,
+            exc,
+            index,
+            total,
+            conversation_wall_started,
+        )
+        return
 
     conversation_id = str(last.get("conversation_id") or "")
     file_ids = [str(item) for item in last.get("file_ids") or []]

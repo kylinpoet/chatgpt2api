@@ -1,6 +1,11 @@
-﻿# Changelog
+# Changelog
 
 ## Unreleased
+
+## 2.4.9 - 2026-06-30
+
++ [修复] 图片上游 SSE 超时后会自动补查 conversation 和 tasks，尽量识别任务错误、策略拒绝、最后上游文本或已生成的图片结果，避免只看到 `SSE stream exceeded`。
++ [优化] 如果 SSE 超时后发现图片结果已经落在会话里，会尝试继续解析和下载返回；否则把补查摘要写入调用日志的 `stream_timeout_followup`。
 
 ## 2.4.8 - 2026-06-30
 

@@ -519,6 +519,8 @@ def _exception_log_fields(exc: Exception) -> dict[str, object]:
         ("upstream_message_preview", "upstream_message_preview"),
         ("poll_attempts", "poll_attempts"),
         ("poll_timeout_secs", "poll_timeout_secs"),
+        ("stream_timeout_secs", "stream_timeout_secs"),
+        ("stream_timeout_followup", "stream_timeout_followup"),
         ("last_task_error", "last_task_error"),
         ("last_conversation_snapshot", "last_conversation_snapshot"),
     ):
