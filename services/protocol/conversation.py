@@ -14,7 +14,7 @@ import tiktoken
 from services.account_service import ImageAccountSelectionError, account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
-from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, ImageTextReplyError, OpenAIBackendAPI
 from services.proxy_service import proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
 from services.request_cancel_service import RequestCancelledError, request_cancel_service
@@ -336,20 +336,21 @@ def _resolve_image_urls_with_monitor(
             **kwargs,
         )
     except Exception as exc:
+        text_reply = isinstance(exc, ImageTextReplyError)
         if request.trace_image_perf:
             resolve_ms = _elapsed_ms(resolve_started)
             _monitor_image_stage(
                 request,
-                "image_resolve_failed",
+                "image_text_reply" if text_reply else "image_resolve_failed",
                 conversation_id=conversation_id,
                 resolve_ms=resolve_ms,
                 index=index,
                 total=total,
-                status="failed",
+                status="text_reply" if text_reply else "failed",
                 upstream_error=diagnostic_excerpt(repr(exc), 1000),
             )
             log_payload: dict[str, Any] = {
-                "event": "image_resolve_failed",
+                "event": "image_text_reply" if text_reply else "image_resolve_failed",
                 "call_id": request.call_id,
                 "conversation_id": conversation_id,
                 "resolve_ms": resolve_ms,
@@ -357,7 +358,10 @@ def _resolve_image_urls_with_monitor(
             }
             if path:
                 log_payload["path"] = path
-            logger.warning(log_payload)
+            if text_reply:
+                logger.info(log_payload)
+            else:
+                logger.warning(log_payload)
         raise
     if request.trace_image_perf:
         resolve_ms = _elapsed_ms(resolve_started)
@@ -1574,7 +1578,7 @@ def stream_image_outputs(
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
-    is_text_reply = bool(message and is_model_text_reply_instead_of_image(message))
+    is_text_reply = bool(message and backend._is_human_facing_image_text_reply_payload(message, last))
     conversation_stream_ms = int((time.perf_counter() - conversation_stream_started) * 1000)
     http_timing = _backend_http_timing_data(backend)
     _monitor_image_stage(
@@ -1604,7 +1608,7 @@ def stream_image_outputs(
 
     if is_text_reply:
         logger.info({
-            "event": "image_detected_text_reply_with_ids",
+            "event": "image_stream_text_reply_detected",
             "conversation_id": conversation_id,
             "message_preview": message[:200],
         })
@@ -2131,6 +2135,47 @@ def _generate_single_image(
                 upstream_error=str(exc),
                 raw_upstream_message=str(exc),
             ) from exc
+        except ImageTextReplyError as exc:
+            account_service.mark_image_result(token, False)
+            text_reply = str(exc) or "上游返回了文本回复而不是图片。"
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_text_reply",
+                    stream_error_ms=int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0,
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                    status="text_reply",
+                    upstream_error=text_reply,
+                )
+            logger.info({
+                "event": "image_stream_text_reply",
+                "request_token": token,
+                "account_email": account_email,
+                "conversation_id": getattr(exc, "conversation_id", ""),
+                "message_preview": diagnostic_excerpt(text_reply, 1000),
+                "index": index,
+            })
+            image_error = ImageGenerationError(
+                text_reply,
+                status_code=400,
+                error_type="invalid_request_error",
+                code="upstream_text_reply",
+                account_email=account_email,
+                conversation_id=getattr(exc, "conversation_id", ""),
+                raw_error=text_reply,
+                upstream_error=str(getattr(exc, "upstream_error", "") or text_reply),
+                raw_upstream_message=str(getattr(exc, "raw_upstream_message", "") or text_reply),
+            )
+            for attr in (
+                "upstream_message_preview",
+                "last_conversation_snapshot",
+                "last_assistant_text",
+            ):
+                if hasattr(exc, attr):
+                    setattr(image_error, attr, getattr(exc, attr))
+            raise image_error from exc
         except ImageGenerationError as exc:
             account_service.mark_image_result(token, False)
             if account_email and not getattr(exc, "account_email", ""):

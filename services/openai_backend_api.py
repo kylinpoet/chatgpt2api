@@ -44,6 +44,11 @@ class ImageContentPolicyError(RuntimeError):
     pass
 
 
+class ImageTextReplyError(RuntimeError):
+    """图片回合最终返回面向用户的文本，而不是图片产物。"""
+    pass
+
+
 @dataclass
 class ChatRequirements:
     """保存一次对话请求所需的 sentinel token。"""
@@ -1961,6 +1966,112 @@ class OpenAIBackendAPI:
         return "\n".join(part for part in parts if part).strip()
 
     @staticmethod
+    def _json_text_candidate(text: str) -> str:
+        value = str(text or "").strip()
+        fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", value, flags=re.IGNORECASE | re.DOTALL)
+        if fence:
+            return fence.group(1).strip()
+        return value
+
+    @classmethod
+    def _is_image_tool_argument_text(cls, text: str) -> bool:
+        """识别图片工具参数 JSON，避免误当成面向用户的文本回复。
+
+        ChatGPT 图片回合有时会把生成工具参数留在 conversation 里，例如
+        {"prompt": "...", "size": "...", "n": 1}。这属于内部生图尝试产物，
+        不能当作模型自然语言回复。
+        """
+        candidate = cls._json_text_candidate(text)
+        if not candidate:
+            return False
+
+        parsed: Any
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError):
+            stripped = candidate.lstrip()
+            if not stripped.startswith(("{", "[")):
+                return False
+            lower = stripped.lower()
+            if '"referenced_image_ids"' in lower:
+                return True
+            if '"prompt"' in lower and any(f'"{key}"' in lower for key in ("size", "n", "quality", "style")):
+                return True
+            return '"size"' in lower and '"n"' in lower
+
+        keys: set[str] = set()
+
+        def collect_keys(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    keys.add(str(key).strip().lower())
+                    collect_keys(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect_keys(item)
+
+        collect_keys(parsed)
+        if "referenced_image_ids" in keys:
+            return True
+        image_option_keys = {
+            "size",
+            "n",
+            "quality",
+            "style",
+            "transparent_background",
+            "output_format",
+            "background",
+        }
+        if "prompt" in keys and keys.intersection(image_option_keys):
+            return True
+        return {"size", "n"}.issubset(keys)
+
+    @classmethod
+    def _is_human_facing_image_text_reply(cls, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        if cls._is_image_tool_argument_text(value):
+            return False
+        return True
+
+    @classmethod
+    def _is_human_facing_image_text_reply_payload(cls, text: str, payload: Any | None = None) -> bool:
+        """只识别面向用户的文本回复；图片产物和工具参数不算文本回复。"""
+        if not cls._is_human_facing_image_text_reply(text):
+            return False
+        if payload is None:
+            return True
+        file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
+        if file_ids or sediment_ids:
+            return False
+        return not cls._has_image_asset_pointer(payload)
+
+    def _find_image_text_reply_in_conversation(self, data: Dict[str, Any]) -> str:
+        """返回最新的 assistant/tool 文本回复；跳过工具参数和图片产物。"""
+        mapping_value = data.get("mapping") or {}
+        mapping = mapping_value if isinstance(mapping_value, dict) else {}
+        candidates: list[tuple[float, str]] = []
+        for node in mapping.values():
+            message = (node or {}).get("message") or {}
+            if not isinstance(message, dict):
+                continue
+            author = message.get("author") or {}
+            role = str(author.get("role") or "").strip().lower()
+            if role not in {"assistant", "tool"}:
+                continue
+            content = message.get("content") or {}
+            metadata = message.get("metadata") or {}
+            text = self._editable_message_text(message)
+            if not self._is_human_facing_image_text_reply_payload(text, {"content": content, "metadata": metadata}):
+                continue
+            candidates.append((float(message.get("create_time") or 0.0), text))
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: item[0])
+        return diagnostic_excerpt(candidates[-1][1], 2000)
+
+    @staticmethod
     def _extract_editable_export_paths(payload: Any, export_file_re: re.Pattern[str]) -> list[str]:
         if isinstance(payload, str):
             text = payload
@@ -2411,8 +2522,12 @@ class OpenAIBackendAPI:
             # 在每次轮询时，检查 /backend-api/tasks/ 是否有错误（仅记录，不中断）
             # 内容政策违规检测通过对话文本进行（在 _find_content_policy_error_in_conversation 中）
             last_task_error = ""
+            task_count = 0
+            task_check_ok = False
             try:
                 tasks = self._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
+                task_count = len(tasks)
+                task_check_ok = True
                 for task in tasks:
                     is_error, error_msg, metadata = self.check_task_error(task)
                     if is_error and error_msg:
@@ -2469,6 +2584,23 @@ class OpenAIBackendAPI:
                         "error_msg": policy_msg[:200],
                     })
                     raise ImageContentPolicyError(policy_msg)
+                text_reply = self._find_image_text_reply_in_conversation(conversation)
+                if text_reply:
+                    logger.info({
+                        "event": "image_poll_text_reply",
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "task_count": task_count if task_check_ok else None,
+                        "text_preview": diagnostic_excerpt(text_reply, 300),
+                    })
+                    exc = ImageTextReplyError(text_reply)
+                    setattr(exc, "conversation_id", conversation_id or "")
+                    setattr(exc, "last_assistant_text", text_reply)
+                    setattr(exc, "raw_upstream_message", text_reply)
+                    setattr(exc, "upstream_error", text_reply)
+                    setattr(exc, "upstream_message_preview", diagnostic_excerpt(text_reply, 500))
+                    setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+                    raise exc
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})

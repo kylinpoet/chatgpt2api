@@ -1220,6 +1220,7 @@ function summaryText(item: LogRow): string {
 }
 
 function statusLabel(item: LogRow): string {
+  if (item.errorCode === 'upstream_text_reply' || item.status.toLowerCase() === 'text_reply') return '未出图'
   if (isSuccess(item)) return '成功'
   if (isFailed(item)) return '失败'
   if (isLimited(item)) return '受限'
@@ -1227,6 +1228,7 @@ function statusLabel(item: LogRow): string {
 }
 
 function statusTone(item: LogRow): 'success' | 'danger' | 'warning' | 'muted' {
+  if (item.errorCode === 'upstream_text_reply' || item.status.toLowerCase() === 'text_reply') return 'warning'
   if (isSuccess(item)) return 'success'
   if (isFailed(item)) return 'danger'
   if (isLimited(item)) return 'warning'

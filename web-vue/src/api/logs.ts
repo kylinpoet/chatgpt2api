@@ -197,6 +197,7 @@ function normalizeLevel(item: SystemLog): LogEntry['level'] {
   const status = cleanString(detail.status).toLowerCase()
   const error = cleanString(detail.error)
   const errorCode = cleanString(detail.error_code || detail?.diagnosis?.error_code)
+  if (errorCode === 'upstream_text_reply' || status === 'text_reply') return 'WARNING'
   if (status === 'failed' || error || errorCode) return 'ERROR'
   if (status === 'warning' || status === 'limited') return 'WARNING'
   return 'INFO'
@@ -335,10 +336,11 @@ function buildSystemLogDiagnosisChips(row: {
   toolInvoked: string
 }): LogDiagnosisChip[] {
   const chips: LogDiagnosisChip[] = []
+  const isTextReply = row.errorCode === 'upstream_text_reply'
   const duration = formatLogDuration(row.durationMs)
   if (duration) chips.push({ label: `耗时 ${duration}`, tone: 'neutral' })
-  if (row.statusCode) chips.push({ label: `HTTP ${row.statusCode}`, tone: Number(row.statusCode) >= 400 ? 'danger' : 'neutral' })
-  if (row.errorCode) chips.push({ label: `code=${row.errorCode}`, tone: 'warning' })
+  if (row.statusCode) chips.push({ label: `HTTP ${row.statusCode}`, tone: isTextReply ? 'warning' : Number(row.statusCode) >= 400 ? 'danger' : 'neutral' })
+  if (row.errorCode) chips.push({ label: isTextReply ? '上游文本回复' : `code=${row.errorCode}`, tone: 'warning' })
   if (row.stage) chips.push({ label: `stage=${row.stage}`, tone: 'info' })
   if (row.canResumePoll) chips.push({ label: '可继续轮询', tone: 'info' })
   if (row.rawUpstreamMessage || row.upstreamPreview || row.upstreamMessageLen) {
@@ -455,6 +457,7 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
 }
 
 export function isSystemLogFailed(item: SystemLogRow): boolean {
+  if (item.errorCode === 'upstream_text_reply' || item.status.toLowerCase() === 'text_reply') return false
   return item.status.toLowerCase() === 'failed' || Boolean(item.error || item.errorCode)
 }
 
