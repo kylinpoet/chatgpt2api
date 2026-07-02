@@ -156,10 +156,12 @@ import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import {
+  getBooleanPreference,
   getJsonPreference,
   getNumberPreference,
   getStringPreference,
   preferenceKeys,
+  setBooleanPreference,
   setJsonPreference,
   setNumberPreference,
   setStringPreference,
@@ -197,7 +199,7 @@ const composerError = ref('')
 const editingMessageId = ref('')
 const isSending = ref(false)
 const isStreaming = ref(false)
-const isFullscreen = ref(false)
+const isFullscreen = ref(getBooleanPreference(preferenceKeys.studioFullscreen, false))
 const isMobileHistoryOpen = ref(false)
 const isFetchingTasks = ref(false)
 const sidebarWidth = ref(getNumberPreference(preferenceKeys.studioSidebarWidth, defaultSidebarWidth, { min: 220, max: 380 }))
@@ -315,6 +317,7 @@ watch(conversationNotices, schedulePersistConversationNotices)
 watch(activeConversationId, schedulePersistActiveConversationId)
 watch(requestedImageTaskIds, () => scheduleImageTaskRefresh())
 watch(pendingImageTaskIds, scheduleImagePoll)
+watch(isFullscreen, (value) => setBooleanPreference(preferenceKeys.studioFullscreen, value))
 watch(sidebarWidth, (value) => setNumberPreference(preferenceKeys.studioSidebarWidth, value))
 watch(() => imageForm.model, (model) => {
   setStringPreference(preferenceKeys.studioImageModel, model || DEFAULT_IMAGE_MODEL)

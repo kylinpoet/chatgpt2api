@@ -14,6 +14,7 @@ export const preferenceKeys = {
   studioChatModel: 'studio-chat-model',
   studioConversationBadges: 'studio-conversation-badges',
   studioConversations: 'studio-conversations',
+  studioFullscreen: 'studio-fullscreen',
   studioImageModel: 'studio-image-model',
   studioSidebarWidth: 'studio-sidebar-width',
   themeMode: 'theme-mode',
