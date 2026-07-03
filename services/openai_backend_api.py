@@ -1238,19 +1238,24 @@ class OpenAIBackendAPI:
         }
         path = "/backend-api/f/conversation"
         timeout_secs = config.image_stream_timeout_secs
+        # Keep the transport/curl deadline slightly above the logical SSE
+        # deadline.  Otherwise curl_cffi can raise curl(28) first and bypass
+        # the stream-timeout recovery probe that fetches conversation/task
+        # diagnostics.
+        transport_timeout_secs = max(timeout_secs + 30, timeout_secs * 1.1)
         curl_options = getattr(self.session, "curl_options", None)
         previous_total_timeout = None
         had_total_timeout = False
         if isinstance(curl_options, dict):
             had_total_timeout = CurlOpt.TIMEOUT_MS in curl_options
             previous_total_timeout = curl_options.get(CurlOpt.TIMEOUT_MS)
-            curl_options[CurlOpt.TIMEOUT_MS] = int(timeout_secs * 1000)
+            curl_options[CurlOpt.TIMEOUT_MS] = int(transport_timeout_secs * 1000)
         try:
             response = self.session.post(
                 self.base_url + path,
                 headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
                 json=payload,
-                timeout=timeout_secs,
+                timeout=transport_timeout_secs,
                 stream=True,
             )
         finally:
@@ -2098,28 +2103,119 @@ class OpenAIBackendAPI:
             return False
         return True
 
+    @staticmethod
+    def _payload_status_values(payload: Any | None) -> list[str]:
+        """Extract status/state values from ChatGPT message payloads and SSE patches."""
+        values: list[str] = []
+
+        def add(value: Any) -> None:
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized:
+                    values.append(normalized)
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                patch_path = str(value.get("p") or "").strip().lower()
+                if patch_path.endswith("/message/status") or patch_path == "/message/status":
+                    add(value.get("v"))
+                for key, item in value.items():
+                    lowered_key = str(key).strip().lower()
+                    if lowered_key in {"status", "state"}:
+                        add(item)
+                    if isinstance(item, (dict, list, tuple)):
+                        visit(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return values
+
+    @staticmethod
+    def _payload_has_completion_marker(payload: Any | None) -> bool:
+        """Return True when payload has structured completion metadata."""
+        found = False
+
+        def visit(value: Any) -> None:
+            nonlocal found
+            if found:
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    lowered_key = str(key).strip().lower()
+                    if lowered_key in {"is_complete", "complete"} and item is True:
+                        found = True
+                        return
+                    if lowered_key == "finish_details" and isinstance(item, dict) and item:
+                        found = True
+                        return
+                    if isinstance(item, (dict, list, tuple)):
+                        visit(item)
+                        if found:
+                            return
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+                    if found:
+                        return
+
+        visit(payload)
+        return found
+
+    @staticmethod
+    def _is_terminal_status_value(value: str) -> bool:
+        normalized = str(value or "").strip().lower()
+        if not normalized or "incomplete" in normalized:
+            return False
+        return (
+            normalized.startswith("finish")
+            or normalized.startswith("success")
+            or normalized.startswith("succeed")
+            or normalized in {"complete", "completed", "done"}
+        )
+
+    @classmethod
+    def _has_nonterminal_structured_status(cls, payload: Any | None) -> bool:
+        """Return True only when upstream exposes status but no completion marker."""
+        statuses = cls._payload_status_values(payload)
+        if not statuses:
+            return False
+        if cls._payload_has_completion_marker(payload):
+            return False
+        return not any(cls._is_terminal_status_value(status) for status in statuses)
+
     @classmethod
     def _is_image_generation_state_payload(cls, payload: Any | None) -> bool:
+        """Return True for structural image-generation state/tool payloads.
+
+        This deliberately does not inspect natural-language text (for example
+        ChatGPT's localized queue message).  It only uses message metadata and
+        embedded image references, so normal assistant text can still surface as
+        an upstream text reply.
+        """
         if not isinstance(payload, dict):
             return False
-        if str(payload.get("turn_use_case") or "").strip() == "image gen":
-            return True
         metadata = payload.get("metadata") or {}
         content = payload.get("content") or {}
         if not isinstance(metadata, dict):
             metadata = {}
         if not isinstance(content, dict):
             content = {}
-        if str(metadata.get("turn_use_case") or "").strip() == "image gen":
+
+        def meta_text(key: str) -> str:
+            value = payload.get(key)
+            if value in (None, ""):
+                value = metadata.get(key)
+            return str(value or "").strip().lower()
+
+        if meta_text("turn_use_case") == "image gen":
             return True
-        if str(metadata.get("async_task_type") or "").strip() == "image_gen":
+        if meta_text("async_task_type") == "image_gen":
             return True
-        status = str(metadata.get("status") or payload.get("status") or "").strip().lower()
-        if status in {"queued", "pending", "running", "in_progress", "processing"}:
+        if meta_text("message_type") in {"image_generation", "image_gen"}:
             return True
-        message_type = str(metadata.get("message_type") or payload.get("message_type") or "").strip().lower()
-        if message_type in {"image_generation", "image_gen"}:
-            return True
+
         file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
         return bool(
             file_ids
@@ -2137,13 +2233,15 @@ class OpenAIBackendAPI:
             return True
         if cls._is_image_generation_state_payload(payload):
             return False
+        if cls._has_nonterminal_structured_status(payload):
+            return False
         file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
         if file_ids or sediment_ids:
             return False
         return not cls._has_image_asset_pointer(payload)
 
     def _find_image_text_reply_in_conversation(self, data: Dict[str, Any]) -> str:
-        """返回最新的 assistant/tool 文本回复；跳过工具参数、图片产物和图片任务状态。"""
+        """返回最新的 assistant/tool 文本回复；跳过工具参数、图片产物和未完成消息。"""
         mapping_value = data.get("mapping") or {}
         mapping = mapping_value if isinstance(mapping_value, dict) else {}
         candidates: list[tuple[float, str]] = []
@@ -2159,6 +2257,33 @@ class OpenAIBackendAPI:
             if not self._is_human_facing_image_text_reply_payload(text, message):
                 continue
             candidates.append((float(message.get("create_time") or 0.0), text))
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: item[0])
+        return diagnostic_excerpt(candidates[-1][1], 2000)
+
+    def _find_actionable_image_text_reply_in_conversation(self, data: Dict[str, Any]) -> str:
+        """Return the final assistant text that terminates an image attempt.
+
+        Tool-role text is diagnostic only.  Successful image turns can briefly
+        expose tool/status text before file IDs are committed to the conversation
+        document, so treating any tool text as terminal causes false failures.
+        A real text fallback should surface as an assistant message for the user.
+        """
+        mapping_value = data.get("mapping") or {}
+        mapping = mapping_value if isinstance(mapping_value, dict) else {}
+        candidates: list[tuple[float, str]] = []
+        for node in mapping.values():
+            message = (node or {}).get("message") or {}
+            if not isinstance(message, dict):
+                continue
+            author = message.get("author") or {}
+            role = str(author.get("role") or "").strip().lower()
+            if role != "assistant":
+                continue
+            text = self._editable_message_text(message)
+            if self._is_human_facing_image_text_reply_payload(text, message):
+                candidates.append((float(message.get("create_time") or 0.0), text))
         if not candidates:
             return ""
         candidates.sort(key=lambda item: item[0])
@@ -2599,7 +2724,9 @@ class OpenAIBackendAPI:
                 "content_type": str(content.get("content_type") or "") if isinstance(content, dict) else type(content).__name__,
             }
             for key in ("async_task_type", "status", "message_type", "model_slug"):
-                value = metadata.get(key) if isinstance(metadata, dict) else None
+                value = message.get(key) if key == "status" else None
+                if value in (None, "") and isinstance(metadata, dict):
+                    value = metadata.get(key)
                 if value not in (None, ""):
                     item[key] = value
             if file_ids:
@@ -2698,6 +2825,7 @@ class OpenAIBackendAPI:
         last_conversation_snapshot: Dict[str, Any] = {}
         last_assistant_text = ""
         last_text_reply = ""
+        last_text_reply_actionable = False
         while _remaining() > 0:
             attempt += 1
             # 在每次轮询时，检查 /backend-api/tasks/ 是否有错误（仅记录，不中断）
@@ -2775,7 +2903,17 @@ class OpenAIBackendAPI:
                             "task_count": task_count if task_check_ok else None,
                             "text_preview": diagnostic_excerpt(text_reply, 300),
                         })
-                    last_text_reply = text_reply
+                    actionable_text_reply = self._find_actionable_image_text_reply_in_conversation(conversation)
+                    if actionable_text_reply:
+                        last_text_reply = actionable_text_reply
+                        last_text_reply_actionable = True
+                        exc = ImageTextReplyError(actionable_text_reply)
+                        setattr(exc, "conversation_id", conversation_id or "")
+                        setattr(exc, "upstream_error", actionable_text_reply)
+                        setattr(exc, "raw_upstream_message", actionable_text_reply)
+                        setattr(exc, "last_assistant_text", actionable_text_reply)
+                        setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+                        raise exc
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
@@ -2817,8 +2955,8 @@ class OpenAIBackendAPI:
             # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
             "last_task_error": last_task_error if last_task_error else None,
-            "last_text_reply": last_text_reply or None,
-            "last_assistant_text": last_assistant_text or None,
+            "last_text_reply": last_text_reply if last_text_reply_actionable else None,
+            "last_assistant_text": last_assistant_text if last_text_reply_actionable else None,
             "last_conversation_snapshot": last_conversation_snapshot or None,
         })
         exc = ImagePollTimeoutError(
@@ -2832,8 +2970,8 @@ class OpenAIBackendAPI:
         setattr(exc, "conversation_id", conversation_id or "")
         setattr(exc, "poll_attempts", attempt)
         setattr(exc, "poll_timeout_secs", timeout_secs)
-        setattr(exc, "last_assistant_text", last_assistant_text or "")
-        setattr(exc, "last_text_reply", last_text_reply or "")
+        setattr(exc, "last_assistant_text", last_assistant_text if last_text_reply_actionable else "")
+        setattr(exc, "last_text_reply", last_text_reply if last_text_reply_actionable else "")
         setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
         if last_task_error:
             setattr(exc, "upstream_error", last_task_error)

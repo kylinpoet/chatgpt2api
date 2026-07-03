@@ -1625,7 +1625,16 @@ def stream_image_outputs(
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
-    is_text_reply = bool(message and backend._is_human_facing_image_text_reply_payload(message, last))
+    # Image-generation SSE can finish with a human-readable queue/status
+    # placeholder while the actual file IDs are still committed via the
+    # conversation document.  When the turn structurally says an image should be
+    # polled, do not treat stream text as terminal; let the poll path decide
+    # from conversation/tool structure.
+    is_text_reply = bool(
+        message
+        and not should_poll_for_image
+        and backend._is_human_facing_image_text_reply_payload(message, last)
+    )
     conversation_stream_ms = int((time.perf_counter() - conversation_stream_started) * 1000)
     http_timing = _backend_http_timing_data(backend)
     _monitor_image_stage(
@@ -1673,6 +1682,14 @@ def stream_image_outputs(
         error_text = detailed_error or message or "Image generation was rejected by upstream policy."
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=error_text, conversation_id=conversation_id)
         return
+
+    if is_text_reply and message and not file_ids and not sediment_ids:
+        text_exc = ImageTextReplyError(message)
+        setattr(text_exc, "conversation_id", conversation_id or "")
+        setattr(text_exc, "upstream_error", message)
+        setattr(text_exc, "raw_upstream_message", message)
+        setattr(text_exc, "last_assistant_text", message)
+        raise text_exc
 
     detailed_error = ""
     if not file_ids and not sediment_ids and conversation_id:
@@ -1726,7 +1743,7 @@ def stream_image_outputs(
         yield result_output
         return
 
-    if message:
+    if message and not should_poll_for_image:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
         return
 
