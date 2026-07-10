@@ -40,6 +40,7 @@ export const providerTypeOptions = [
   { value: 'inbucket', label: 'Inbucket' },
   { value: 'duckmail', label: 'DuckMail' },
   { value: 'gptmail', label: 'GPTMail' },
+  { value: 'donemail', label: 'DoneMail' },
   { value: 'yyds_mail', label: 'YYDS Mail' },
   { value: 'ddg_mail', label: 'DDG + CF 收件箱' },
   { value: 'outlook_token', label: 'Microsoft 邮箱凭据池' },
@@ -98,6 +99,7 @@ export const providerTypeKeys: Record<string, string[]> = {
   inbucket: ['api_base', 'domain', 'random_subdomain'],
   duckmail: ['api_key', 'default_domain'],
   gptmail: ['key_mode', 'api_key', 'default_domain', 'local_compose'],
+  donemail: ['api_base', 'admin_key', 'domain', 'email_prefix', 'message_limit'],
   yyds_mail: ['api_base', 'api_key', 'domain', 'subdomain', 'wildcard'],
   ddg_mail: ['api_base', 'ddg_token', 'cf_inbox_jwt', 'admin_password', 'cf_api_key', 'cf_auth_mode', 'cf_create_path', 'cf_messages_path'],
   outlook_token: ['mailboxes', 'mode', 'imap_host', 'message_limit', 'alias_enabled', 'alias_per_email', 'alias_prefix', 'alias_include_original'],
@@ -166,6 +168,8 @@ export function defaultProvider(type = 'cloudmail_gen'): RegisterProvider {
       return { ...base, api_key: '', default_domain: 'duckmail.sbs' }
     case 'gptmail':
       return { ...base, key_mode: 'public', api_key: '', default_domain: '', local_compose: false }
+    case 'donemail':
+      return { ...base, api_base: '', admin_key: '', domain: [], email_prefix: '', message_limit: 20 }
     case 'yyds_mail':
       return { ...base, api_base: 'https://maliapi.215.im/v1', api_key: '', domain: [], subdomain: '', wildcard: false }
     case 'ddg_mail':
@@ -444,6 +448,11 @@ export function providerRequirementMessages(provider: RegisterProvider) {
       if (!providerUsesPublicGptMailKey(provider)) requireValue(provider.api_key, 'API Key')
       if (provider.local_compose) requireValue(provider.default_domain, '默认域名')
       break
+    case 'donemail':
+      requireValue(provider.api_base, 'DoneMail URL')
+      requireValue(provider.admin_key, 'Admin Key')
+      requireList(provider.domain, '域名')
+      break
     case 'yyds_mail':
       requireValue(provider.api_key, 'API Key')
       break
@@ -465,7 +474,7 @@ export function providerRequirementMessages(provider: RegisterProvider) {
 }
 
 export function providerUsesApiBase(provider: RegisterProvider) {
-  return ['cloudmail_gen', 'cloudflare_temp_email', 'moemail', 'inbucket', 'yyds_mail', 'ddg_mail'].includes(providerType(provider))
+  return ['cloudmail_gen', 'cloudflare_temp_email', 'moemail', 'inbucket', 'yyds_mail', 'ddg_mail', 'donemail'].includes(providerType(provider))
 }
 
 export function providerUsesApiKey(provider: RegisterProvider) {
@@ -481,18 +490,20 @@ export function providerUsesDefaultDomain(provider: RegisterProvider) {
 }
 
 export function providerUsesDomainList(provider: RegisterProvider) {
-  return ['cloudmail_gen', 'tempmail_lol', 'cloudflare_temp_email', 'moemail', 'inbucket', 'yyds_mail'].includes(providerType(provider))
+  return ['cloudmail_gen', 'tempmail_lol', 'cloudflare_temp_email', 'moemail', 'inbucket', 'yyds_mail', 'donemail'].includes(providerType(provider))
 }
 
 export function apiBaseLabel(provider: RegisterProvider) {
   const type = providerType(provider)
   if (type === 'cloudmail_gen') return 'CloudMail URL'
   if (type === 'ddg_mail') return 'CF API Base'
+  if (type === 'donemail') return 'DoneMail URL'
   return 'API Base'
 }
 
 export function apiBasePlaceholder(provider: RegisterProvider) {
   const type = providerType(provider)
+  if (type === 'donemail') return 'https://sow.us.kg'
   if (type === 'yyds_mail') return 'https://maliapi.215.im/v1'
   return ''
 }
@@ -512,6 +523,7 @@ export function domainPlaceholder(provider: RegisterProvider) {
   if (type === 'moemail') return '每行一个域名'
   if (type === 'tempmail_lol') return '每行一个域名，可留空使用服务默认'
   if (type === 'yyds_mail') return '每行一个域名，可留空'
+  if (type === 'donemail') return '每行一个 DoneMail 已接收域名'
   return '每行一个域名'
 }
 

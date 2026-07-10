@@ -93,6 +93,17 @@
           />
         </label>
 
+        <label v-if="currentType === 'donemail'" class="register-field">
+          <span class="register-label">Admin Key</span>
+          <Input
+            :model-value="provider.admin_key"
+            block
+            root-class="font-mono"
+            :disabled="disabled"
+            @update:model-value="value => emit('update-field', index, 'admin_key', String(value || '').trim())"
+          />
+        </label>
+
         <label v-if="providerUsesAdminPassword(provider)" class="register-field">
           <span class="register-label">{{ currentType === 'ddg_mail' ? 'CF Admin Password' : 'Admin Password' }}</span>
           <Input
@@ -126,7 +137,7 @@
           />
         </label>
 
-        <label v-if="currentType === 'cloudmail_gen'" class="register-field">
+        <label v-if="currentType === 'cloudmail_gen' || currentType === 'donemail'" class="register-field">
           <span class="register-label">邮箱前缀</span>
           <Input
             :model-value="provider.email_prefix"
@@ -134,6 +145,19 @@
             :disabled="disabled"
             placeholder="可选"
             @update:model-value="value => emit('update-field', index, 'email_prefix', String(value || '').trim())"
+          />
+        </label>
+
+        <label v-if="currentType === 'donemail'" class="register-field">
+          <span class="register-label">读取邮件数</span>
+          <Input
+            :model-value="provider.message_limit"
+            type="number"
+            min="1"
+            max="50"
+            block
+            :disabled="disabled"
+            @update:model-value="value => emit('update-field', index, 'message_limit', numberModelValue(value))"
           />
         </label>
 
