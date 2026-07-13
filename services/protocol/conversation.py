@@ -973,12 +973,8 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         except Exception as exc:
             error_message = str(exc)
             if token and not emitted and is_token_invalid_error(error_message):
-                refreshed_token = account_service.refresh_access_token(token, force=True, event="text_stream")
-                if refreshed_token and refreshed_token != token and refreshed_token not in attempted_tokens:
-                    token = refreshed_token
-                else:
-                    account_service.handle_invalid_token(token, "text_stream", error=error_message)
-                    token = account_service.get_text_access_token(attempted_tokens)
+                account_service.schedule_auth_verification(token, "text_stream")
+                token = account_service.get_text_access_token(attempted_tokens)
                 if token:
                     continue
             if token and not getattr(exc, "account_email", ""):
@@ -1745,7 +1741,6 @@ def _generate_single_image(
     account_email = ""
     retry_token = ""
     attempted_tokens: set[str] = set()
-    auth_retry_used = False
     fallback_retry_pending = False
     fallback_retry_used = False
     fallback_from_egress: dict[str, Any] = {}
@@ -1826,7 +1821,6 @@ def _generate_single_image(
                 )
                 attempted_tokens.add(token)
                 account_attempt_started = account_wait_started
-                auth_retry_used = False
                 fallback_retry_pending = False
                 fallback_retry_used = False
                 fallback_from_egress = {}
@@ -2318,15 +2312,6 @@ def _generate_single_image(
                 "index": index,
                 **http_timing,
             })
-            if not emitted_for_token and failure.code == "auth_invalid":
-                if not auth_retry_used:
-                    auth_retry_used = True
-                    refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
-                    if refreshed_token and refreshed_token != token:
-                        retry_token = refreshed_token
-                        attempted_tokens.add(refreshed_token)
-                        continue
-                account_service.handle_invalid_token(token, "image_stream", error=last_error)
             quick_timeout_retry_ms = min(30000, max(5000, int(config.image_stream_timeout_secs * 1000 * 0.2)))
             early_connection_failure = (
                 not emitted_for_token

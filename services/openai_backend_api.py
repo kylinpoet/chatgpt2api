@@ -533,7 +533,7 @@ class OpenAIBackendAPI:
         else:
             executor.shutdown(wait=True, cancel_futures=True)
 
-        plan_type = str(default_account.get("plan_type") or "free")
+        plan_type = account_service._normalize_account_type(default_account.get("plan_type"))
 
         limits_progress = init_payload.get("limits_progress")
         limits_progress = limits_progress if isinstance(limits_progress, list) else []
@@ -541,14 +541,15 @@ class OpenAIBackendAPI:
         result = {
             "email": me_payload.get("email"),
             "user_id": me_payload.get("id"),
-            "type": plan_type,
             "quota": quota,
             "image_quota_unknown": image_quota_unknown,
             "limits_progress": limits_progress,
             "default_model_slug": init_payload.get("default_model_slug"),
             "restore_at": restore_at,
-            "status": "正常" if image_quota_unknown and plan_type.lower() != "free" else ("限流" if quota == 0 else "正常"),
+            "status": "正常" if image_quota_unknown or quota > 0 else "限流",
         }
+        if plan_type:
+            result["type"] = plan_type
         logger.debug({
             "event": "backend_user_info_result",
             "email": result.get("email"),

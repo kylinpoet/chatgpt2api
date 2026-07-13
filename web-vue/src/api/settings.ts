@@ -233,7 +233,7 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     image_settle_enabled: boolValue(source.image_settle_enabled, true),
     image_check_before_hit_enabled: boolValue(source.image_check_before_hit_enabled, true),
     image_settle_secs: numberValue(source.image_settle_secs, 5, 0.5),
-    auto_remove_invalid_accounts: boolValue(source.auto_remove_invalid_accounts, false),
+    auto_remove_invalid_accounts: boolValue(source.auto_remove_invalid_accounts, true),
     auto_remove_rate_limited_accounts: boolValue(source.auto_remove_rate_limited_accounts, false),
     log_levels: Array.isArray(source.log_levels)
       ? source.log_levels.map((item) => cleanString(item).toLowerCase()).filter((item) => ['debug', 'info', 'warning', 'error'].includes(item))
@@ -352,7 +352,7 @@ function toBackendSettings(settings: Settings): RawSettings {
     image_settle_enabled: boolValue(normalized.image_settle_enabled, true),
     image_check_before_hit_enabled: boolValue(normalized.image_check_before_hit_enabled, true),
     image_settle_secs: numberValue(normalized.image_settle_secs, 5, 0.5),
-    auto_remove_invalid_accounts: boolValue(normalized.auto_remove_invalid_accounts, false),
+    auto_remove_invalid_accounts: boolValue(normalized.auto_remove_invalid_accounts, true),
     auto_remove_rate_limited_accounts: boolValue(normalized.auto_remove_rate_limited_accounts, false),
     log_levels: Array.isArray(normalized.log_levels) ? [...normalized.log_levels] : [],
     global_system_prompt: cleanString(normalized.global_system_prompt),
