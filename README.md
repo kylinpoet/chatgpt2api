@@ -181,7 +181,7 @@ docker compose up -d
 - `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
 - `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
 
-说明：该配置只影响账号池和管理 Key。系统设置、调用日志、概览统计、图片索引、注册机配置仍按各自模块独立保存，其中概览统计默认写入 `data/dashboard_metrics.json` 并滚动保留最近 30 天。
+说明：该配置只影响账号池和管理 Key。系统设置、调用日志、图片索引、注册机配置仍按各自模块独立保存；调用日志与最近 30 天概览聚合统一写入 `data/system_logs.db`。
 
 示例：使用 PostgreSQL
 
