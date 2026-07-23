@@ -15,7 +15,6 @@ from services.account_service import account_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import (
-    cleanup_image_retention,
     compress_images,
     delete_images,
     delete_to_target,
@@ -24,7 +23,6 @@ from services.image_service import (
     get_image_response,
     get_thumbnail_response,
     list_images,
-    preview_image_retention_cleanup,
     storage_stats,
 )
 from services.image_failure import is_rate_limit_failure_code, is_structured_failure
@@ -33,54 +31,23 @@ from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.dashboard_metrics_service import dashboard_metrics_service
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.model_catalog_service import get_model_catalog
-from services.proxy_service import proxy_settings, test_clearance, test_proxy
+from services.proxy_service import (
+    normalize_proxy_group_payload,
+    normalize_proxy_groups_payload,
+    normalize_proxy_profile_payload,
+    normalize_proxy_profiles_payload,
+    proxy_settings,
+    test_clearance,
+    test_proxy,
+)
 from services.realtime_monitor_service import realtime_monitor_service
+from services.retention_service import retention_service
 from services.runtime_log_service import list_runtime_logs
 from utils.timezone import beijing_now, parse_to_beijing_naive
 
 
 class SettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
-
-
-SETTINGS_UPDATE_KEYS = {
-    "proxy",
-    "fallback_proxy",
-    "proxy_runtime",
-    "base_url",
-    "refresh_account_interval_minute",
-    "image_retention_days",
-    "log_retention_days",
-    "image_poll_timeout_secs",
-    "image_stream_timeout_secs",
-    "image_poll_interval_secs",
-    "image_poll_initial_wait_secs",
-    "image_account_concurrency",
-    "image_account_retry_enabled",
-    "image_preflight_token_refresh_enabled",
-    "image_upscale_enabled",
-    "image_upscale_engine",
-    "image_auth_refresh_concurrency",
-    "image_max_account_attempts",
-    "image_parallel_generation",
-    "image_remove_conversation_after_result",
-    "image_settle_enabled",
-    "image_check_before_hit_enabled",
-    "image_settle_secs",
-    "auto_remove_invalid_accounts",
-    "auto_remove_rate_limited_accounts",
-    "log_levels",
-    "global_system_prompt",
-    "sensitive_words",
-    "ai_review",
-    "image_generation",
-    "quota_limits",
-    "runtime_capacity",
-    "image_storage",
-    "backup",
-    "chat_completion_cache",
-    "third_party_apps",
-}
 
 
 class ProxyTestRequest(BaseModel):
@@ -95,7 +62,6 @@ class ProxyProfileRequest(BaseModel):
     id: str = ""
     name: str = ""
     proxy: str = ""
-    no_proxy: str = ""
     enabled: bool = True
     notes: str = ""
     create_only: bool = False
@@ -109,8 +75,6 @@ class ProxyProfileTestRequest(BaseModel):
 class ProxyGroupRequest(BaseModel):
     id: str = ""
     name: str = ""
-    strategy: str = "request_random"
-    rotation_interval_minutes: float = 0
     enabled: bool = True
     notes: str = ""
     nodes: list[dict[str, Any]] = Field(default_factory=list)
@@ -143,8 +107,8 @@ class BackupDeleteRequest(BaseModel):
 
 
 class RetentionCleanupRequest(BaseModel):
-    log_retention_days: int | None = None
-    image_retention_days: int | None = None
+    log_retention_hours: int | None = None
+    image_retention_hours: int | None = None
 
 
 class AccountCleanupRequest(BaseModel):
@@ -154,14 +118,6 @@ class AccountCleanupRequest(BaseModel):
 
 def _clean_text(value: object) -> str:
     return str(value or "").strip()
-
-
-def _coerce_proxy_group_rotation_minutes(value: object) -> float:
-    try:
-        minutes = float(value)
-    except (OverflowError, TypeError, ValueError):
-        minutes = 0.0
-    return max(0.0, min(minutes, 1440.0))
 
 
 DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT = 30
@@ -244,16 +200,16 @@ def _config_write_error_message(exc: OSError) -> str:
 
 def _retention_cleanup_payload(body: RetentionCleanupRequest | None = None, *, dry_run: bool) -> dict[str, Any]:
     body = body or RetentionCleanupRequest()
-    log_days = body.log_retention_days or config.log_retention_days
-    image_days = body.image_retention_days or config.image_retention_days
-    logs = log_service.preview_cleanup_old(log_days) if dry_run else log_service.cleanup_old(log_days)
-    images = preview_image_retention_cleanup(image_days) if dry_run else cleanup_image_retention(image_days)
+    log_hours = body.log_retention_hours or config.log_retention_hours
+    image_hours = body.image_retention_hours or config.image_retention_hours
+    logs = retention_service.cleanup("logs", log_hours, dry_run=dry_run)
+    images = retention_service.cleanup("images", image_hours, dry_run=dry_run)
     total_removed = int(logs.get("removed") or 0) + int(images.get("removed") or 0)
     total_size = int(logs.get("removed_size_bytes") or 0) + int(images.get("removed_size_bytes") or 0)
     return {
         "dry_run": dry_run,
-        "logs": {**logs, "retention_days": int(log_days)},
-        "images": {**images, "retention_days": int(image_days)},
+        "logs": {**logs, "retention_hours": int(log_hours)},
+        "images": {**images, "retention_hours": int(image_hours)},
         "total_removed": total_removed,
         "total_size_bytes": total_size,
     }
@@ -285,11 +241,11 @@ def _proxy_group_id(value: object) -> str:
 
 
 def _proxy_profiles_payload() -> dict[str, Any]:
-    return {"profiles": _config_dict_list("proxy_profiles")}
+    return {"profiles": normalize_proxy_profiles_payload(_config_dict_list("proxy_profiles"))}
 
 
 def _proxy_groups_payload() -> dict[str, Any]:
-    return {"groups": _config_dict_list("proxy_groups")}
+    return {"groups": normalize_proxy_groups_payload(_config_dict_list("proxy_groups"))}
 
 
 def _upsert_proxy_profile(body: ProxyProfileRequest) -> dict[str, Any]:
@@ -300,18 +256,17 @@ def _upsert_proxy_profile(body: ProxyProfileRequest) -> dict[str, Any]:
     exists = any(profile.get("id") == profile_id for profile in profiles)
     if body.create_only and exists:
         raise ValueError("proxy profile already exists")
-    item = {
+    item = normalize_proxy_profile_payload({
         "id": profile_id,
         "name": body.name or profile_id,
         "proxy": body.proxy,
-        "no_proxy": body.no_proxy,
         "enabled": body.enabled,
         "notes": body.notes,
-    }
+    })
     next_profiles = [profile for profile in profiles if profile.get("id") != profile_id]
     next_profiles.append(item)
     updated = config.update({"proxy_profiles": next_profiles})
-    profiles = [dict(profile) for profile in updated.get("proxy_profiles", []) if isinstance(profile, dict)]
+    profiles = normalize_proxy_profiles_payload(updated.get("proxy_profiles"))
     return {"profile": item, "profiles": profiles}
 
 
@@ -342,19 +297,17 @@ def _upsert_proxy_group(body: ProxyGroupRequest) -> dict[str, Any]:
                 ),
             }
         )
-    item = {
+    item = normalize_proxy_group_payload({
         "id": group_id,
         "name": body.name or group_id,
-        "strategy": body.strategy or "request_random",
-        "rotation_interval_minutes": _coerce_proxy_group_rotation_minutes(body.rotation_interval_minutes),
         "enabled": body.enabled,
         "notes": body.notes,
         "nodes": nodes,
-    }
+    })
     next_groups = [group for group in groups if group.get("id") != group_id]
     next_groups.append(item)
     updated = config.update({"proxy_groups": next_groups})
-    groups = [dict(group) for group in updated.get("proxy_groups", []) if isinstance(group, dict)]
+    groups = normalize_proxy_groups_payload(updated.get("proxy_groups"))
     return {"group": item, "groups": groups}
 
 
@@ -563,7 +516,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"config": config.get()}
+        return {"config": config.get_public_settings()}
 
     @router.get("/api/third-party-apps")
     async def get_third_party_apps(authorization: str | None = Header(default=None)):
@@ -575,10 +528,10 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         try:
             incoming = body.model_dump(mode="python")
-            updates = {key: value for key, value in incoming.items() if key in SETTINGS_UPDATE_KEYS}
-            if not updates:
-                return {"config": config.get()}
-            return {"config": config.update(updates)}
+            updated = config.update_settings(incoming)
+            if {"image_retention_hours", "log_retention_hours"} & incoming.keys():
+                retention_service.wake()
+            return {"config": updated}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except OSError as exc:
@@ -593,6 +546,11 @@ def create_router(app_version: str) -> APIRouter:
     async def run_retention_cleanup(body: RetentionCleanupRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return await run_in_threadpool(_retention_cleanup_payload, body, dry_run=False)
+
+    @router.get("/api/settings/retention-cleanup/status")
+    async def get_retention_cleanup_status(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return retention_service.status()
 
     @router.post("/api/settings/account-cleanup/preview")
     async def preview_account_cleanup(body: AccountCleanupRequest, authorization: str | None = Header(default=None)):
@@ -614,7 +572,7 @@ def create_router(app_version: str) -> APIRouter:
         request: Request,
         start_date: str = "",
         end_date: str = "",
-        limit: int = Query(default=0, ge=0, le=500),
+        limit: int = Query(default=24, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
         media_type: str = Query(default="all"),
         tag: str = Query(default=""),
@@ -636,21 +594,32 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/images/{image_path:path}", include_in_schema=False)
     async def get_image(image_path: str):
-        return get_image_response(image_path)
+        return await run_in_threadpool(get_image_response, image_path)
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str):
-        return get_thumbnail_response(image_path)
+        return await run_in_threadpool(get_thumbnail_response, image_path)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+        return await run_in_threadpool(
+            delete_images,
+            body.paths,
+            start_date=body.start_date.strip(),
+            end_date=body.end_date.strip(),
+            all_matching=body.all_matching,
+        )
+
+    @router.post("/api/images/retention-cleanup")
+    async def cleanup_expired_images(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(retention_service.cleanup, "images")
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        buf = download_images_zip(body.paths)
+        buf = await run_in_threadpool(download_images_zip, body.paths)
         return StreamingResponse(
             buf,
             media_type="application/zip",
@@ -660,7 +629,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/images/download/{image_path:path}")
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return get_image_download_response(image_path)
+        return await run_in_threadpool(get_image_download_response, image_path)
 
     @router.get("/api/logs")
     async def get_logs(
@@ -693,10 +662,18 @@ def create_router(app_version: str) -> APIRouter:
             offset=offset,
         )
 
+    @router.get("/api/logs/{log_id}")
+    async def get_log_detail(log_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        item = await run_in_threadpool(log_service.get, log_id.strip())
+        if item is None:
+            raise HTTPException(status_code=404, detail="log not found")
+        return item
+
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return log_service.delete(body.ids)
+        return await run_in_threadpool(log_service.delete, body.ids)
 
     @router.get("/api/runtime-logs")
     async def get_runtime_logs(
@@ -762,7 +739,10 @@ def create_router(app_version: str) -> APIRouter:
             updated = config.update({"proxy_profiles": next_profiles})
         except OSError as exc:
             raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
-        return {"deleted": normalized, "profiles": updated.get("proxy_profiles", [])}
+        return {
+            "deleted": normalized,
+            "profiles": normalize_proxy_profiles_payload(updated.get("proxy_profiles")),
+        }
 
     @router.post("/api/proxy/profiles/test")
     async def test_proxy_profile_endpoint(body: ProxyProfileTestRequest, authorization: str | None = Header(default=None)):
@@ -801,7 +781,10 @@ def create_router(app_version: str) -> APIRouter:
             updated = config.update({"proxy_groups": next_groups})
         except OSError as exc:
             raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
-        return {"deleted": normalized, "groups": updated.get("proxy_groups", [])}
+        return {
+            "deleted": normalized,
+            "groups": normalize_proxy_groups_payload(updated.get("proxy_groups")),
+        }
 
     @router.post("/api/proxy/groups/test")
     async def test_proxy_group_endpoint(body: ProxyGroupTestRequest, authorization: str | None = Header(default=None)):
@@ -813,7 +796,14 @@ def create_router(app_version: str) -> APIRouter:
         group_id = _proxy_group_id(body.id)
         if not group_id:
             raise HTTPException(status_code=400, detail={"error": "proxy group id or url is required"})
-        group = next((item for item in _config_dict_list("proxy_groups") if item.get("id") == group_id), None)
+        group = next(
+            (
+                item
+                for item in normalize_proxy_groups_payload(_config_dict_list("proxy_groups"))
+                if item.get("id") == group_id
+            ),
+            None,
+        )
         if group is None:
             raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
         node_id = _slug_id(body.node_id)
@@ -833,7 +823,7 @@ def create_router(app_version: str) -> APIRouter:
         return {
             "results": results,
             "result": results[0]["result"] if len(results) == 1 else None,
-            "groups": _config_dict_list("proxy_groups"),
+            "groups": normalize_proxy_groups_payload(_config_dict_list("proxy_groups")),
         }
 
     @router.get("/api/proxy/runtime")
@@ -1008,7 +998,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/images/storage")
     async def get_image_storage(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return storage_stats()
+        return await run_in_threadpool(storage_stats)
 
     @router.post("/api/images/storage/compress")
     async def compress_all_images(authorization: str | None = Header(default=None)):

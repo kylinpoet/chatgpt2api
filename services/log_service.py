@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import itertools
+import queue
 import re
 import threading
 import time
-from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,7 +16,6 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from services.config import DATA_DIR
 from services.image_failure import (
     ImageFailure,
     ImageGenerationError,
@@ -26,6 +25,7 @@ from services.image_failure import (
     is_text_review_failure_code,
     public_image_error_message,
 )
+from services.log_store_service import SYSTEM_LOGS_FILE, LogStore
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.diagnostics import diagnostic_excerpt, exception_diagnostic_fields
@@ -48,62 +48,164 @@ REQUEST_TEXT_EXCERPT_LIMIT = 1000
 REQUEST_TEXT_FULL_LIMIT = 50000
 
 
+@dataclass
+class _LogFlushBarrier:
+    done: threading.Event = field(default_factory=threading.Event)
+
+
 class LogService:
-    def __init__(self, path: Path):
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._line_count_cache: tuple[int, int, int] | None = None
-        self._type_count_cache: dict[str, tuple[int, int, int]] = {}
+    def __init__(
+        self,
+        path: Path = SYSTEM_LOGS_FILE,
+        *,
+        queue_size: int = 10000,
+        batch_size: int = 100,
+    ):
+        self.path = Path(path)
+        self.store = LogStore(self.path)
+        self._batch_size = max(1, int(batch_size))
+        self._queue: queue.Queue[dict[str, Any] | _LogFlushBarrier] = queue.Queue(
+            maxsize=max(1, int(queue_size))
+        )
+        self._writer_stop = threading.Event()
+        self._writer = threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="system-log-writer",
+        )
+        self._writer.start()
 
     @staticmethod
-    def _legacy_id(raw_line: str, line_number: int) -> str:
-        payload = f"{line_number}:{raw_line}".encode("utf-8", errors="ignore")
-        return hashlib.sha1(payload).hexdigest()[:24]
-
-    def _parse_line(self, raw_line: str, line_number: int) -> dict[str, Any] | None:
+    def _integer(value: object, default: int = 0) -> int:
         try:
-            item = json.loads(raw_line)
-        except Exception:
-            return None
-        if not isinstance(item, dict):
-            return None
-        parsed = dict(item)
-        parsed["id"] = str(parsed.get("id") or self._legacy_id(raw_line, line_number))
-        return parsed
+            return int(float(value or default))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @staticmethod
+    def _created_at_ms(value: object) -> int:
+        text = str(value or "").strip().replace("T", " ")[:19]
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            return int(parsed.replace(tzinfo=timezone(timedelta(hours=8))).timestamp() * 1000)
+        except ValueError:
+            return int(time.time() * 1000)
+
+    @classmethod
+    def _store_record(cls, item: dict[str, Any]) -> dict[str, Any]:
+        detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+        status = cls._clean(cls._detail_value(item, "status")).lower()
+        endpoint = cls._clean(cls._detail_value(item, "endpoint"))
+        model = cls._clean(cls._detail_value(item, "model"))
+        account = cls._clean(cls._detail_value(item, "account_email"))
+        conversation_id = cls._clean(cls._detail_value(item, "conversation_id"))
+        error_code = cls._clean(
+            cls._detail_value(item, "error_code", cls._detail_value(item, "failure_code"))
+        )
+        error = cls._clean(cls._detail_value(item, "error"))
+        attempts = detail.get("image_attempts")
+        attempts = attempts if isinstance(attempts, list) else []
+        image_urls = detail.get("image_urls") or detail.get("urls") or []
+        image_urls = [str(value) for value in image_urls if isinstance(value, str)] if isinstance(image_urls, list) else []
+        search_parts = (
+            item.get("id"),
+            item.get("time"),
+            item.get("type"),
+            item.get("summary"),
+            endpoint,
+            model,
+            status,
+            account,
+            conversation_id,
+            cls._detail_value(item, "key_id"),
+            cls._detail_value(item, "key_name"),
+            cls._detail_value(item, "request_text"),
+            error,
+            error_code,
+            cls._detail_value(item, "reason"),
+            cls._detail_value(item, "stage"),
+        )
+        return {
+            "id": str(item["id"]),
+            "created_at_ms": cls._created_at_ms(item.get("time")),
+            "time": str(item.get("time") or ""),
+            "type": str(item.get("type") or ""),
+            "summary": str(item.get("summary") or ""),
+            "status": status,
+            "endpoint": endpoint,
+            "model": model,
+            "account": account,
+            "conversation_id": conversation_id,
+            "key_id": cls._clean(cls._detail_value(item, "key_id")),
+            "key_name": cls._clean(cls._detail_value(item, "key_name")),
+            "role": cls._clean(cls._detail_value(item, "role")),
+            "duration_ms": cls._integer(cls._detail_value(item, "duration_ms")),
+            "attempt_count": max(
+                len(attempts),
+                cls._integer(cls._detail_value(item, "image_attempt_count")),
+            ),
+            "switch_count": cls._integer(cls._detail_value(item, "account_switch_count")),
+            "image_count": cls._integer(
+                cls._detail_value(item, "image_succeeded_count"),
+                len(image_urls),
+            ),
+            "preview_url": image_urls[0] if image_urls else "",
+            "error_code": error_code,
+            "error": error,
+            "is_failed": int(cls._is_failed(item)),
+            "is_limited": int(cls._is_limited(item)),
+            "is_text_review": int(cls._is_text_review(item)),
+            "is_image": int(cls._is_image_log(item)),
+            "search_text": " ".join(cls._clean(value) for value in search_parts).lower()[:10000],
+            "detail_json": cls._serialize_item(item),
+        }
+
+    def _writer_loop(self) -> None:
+        while not self._writer_stop.is_set() or not self._queue.empty():
+            try:
+                first = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if isinstance(first, _LogFlushBarrier):
+                first.done.set()
+                self._queue.task_done()
+                continue
+
+            batch = [first]
+            barrier: _LogFlushBarrier | None = None
+            while len(batch) < self._batch_size:
+                try:
+                    next_item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(next_item, _LogFlushBarrier):
+                    barrier = next_item
+                    break
+                batch.append(next_item)
+            try:
+                self.store.insert_many(batch)
+            except Exception as exc:
+                logger.error({"event": "system_log_batch_write_failed", "count": len(batch), "error": str(exc)})
+            finally:
+                for _ in batch:
+                    self._queue.task_done()
+                if barrier is not None:
+                    barrier.done.set()
+                    self._queue.task_done()
+
+    def flush(self) -> None:
+        barrier = _LogFlushBarrier()
+        self._queue.put(barrier)
+        barrier.done.wait()
+
+    def close(self) -> None:
+        self.flush()
+        self._writer_stop.set()
+        self._writer.join(timeout=2)
 
     @staticmethod
     def _serialize_item(item: dict[str, Any]) -> str:
         return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-
-    @staticmethod
-    def _timestamp(item: dict[str, Any]) -> float | None:
-        text = str(item.get("time") or "").strip()
-        if not text:
-            return None
-        normalized = text.replace("T", " ")[:19]
-        candidates = (
-            (normalized[:19], "%Y-%m-%d %H:%M:%S"),
-            (normalized[:10], "%Y-%m-%d"),
-        )
-        for value, fmt in candidates:
-            try:
-                return time.mktime(time.strptime(value, fmt))
-            except (TypeError, ValueError):
-                continue
-        return None
-
-    @staticmethod
-    def _matches_filters(item: dict[str, Any], *, type: str = "", start_date: str = "", end_date: str = "") -> bool:
-        t = str(item.get("time") or "")
-        day = t[:10]
-        if type and item.get("type") != type:
-            return False
-        if start_date and day < start_date:
-            return False
-        if end_date and day > end_date:
-            return False
-        return True
 
     @staticmethod
     def _detail_value(item: dict[str, Any], key: str, default: object = "") -> object:
@@ -158,329 +260,6 @@ class LogService:
         model = cls._clean(cls._detail_value(item, "model")).lower()
         return "/images/" in endpoint or ("/v1/chat" in endpoint and "image" in model)
 
-    @classmethod
-    def _matches_extended_filters(
-        cls,
-        item: dict[str, Any],
-        *,
-        type: str = "",
-        start_date: str = "",
-        end_date: str = "",
-        status: str = "",
-        endpoint: str = "",
-        model: str = "",
-        account: str = "",
-        conversation_id: str = "",
-        search: str = "",
-    ) -> bool:
-        if not cls._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
-            return False
-        normalized_status = cls._clean(status).lower()
-        if normalized_status == "success" and cls._clean(cls._detail_value(item, "status")).lower() != "success":
-            return False
-        if normalized_status == "failed" and not cls._is_failed(item):
-            return False
-        if normalized_status == "limited" and not cls._is_limited(item):
-            return False
-        if endpoint and cls._clean(cls._detail_value(item, "endpoint")) != endpoint:
-            return False
-        if model and cls._clean(cls._detail_value(item, "model")) != model:
-            return False
-        if account and cls._clean(cls._detail_value(item, "account_email")) != account:
-            return False
-        if conversation_id and cls._clean(cls._detail_value(item, "conversation_id")) != conversation_id:
-            return False
-        query = cls._clean(search).lower()
-        if query:
-            haystack = " ".join(
-                cls._clean(value)
-                for value in (
-                    item.get("id"),
-                    item.get("time"),
-                    item.get("type"),
-                    item.get("summary"),
-                    cls._detail_value(item, "endpoint"),
-                    cls._detail_value(item, "model"),
-                    cls._detail_value(item, "status"),
-                    cls._detail_value(item, "key_id"),
-                    cls._detail_value(item, "key_name"),
-                    cls._detail_value(item, "account_email"),
-                    cls._detail_value(item, "conversation_id"),
-                    cls._detail_value(item, "request_text"),
-                    cls._detail_value(item, "request_text_full"),
-                    cls._detail_value(item, "error"),
-                    cls._detail_value(item, "error_code"),
-                    cls._detail_value(item, "reason"),
-                    cls._detail_value(item, "stage"),
-                )
-            ).lower()
-            if query not in haystack:
-                return False
-        return True
-
-    def _line_count(self) -> int:
-        if not self.path.exists():
-            return 0
-        stat = self.path.stat()
-        size = stat.st_size
-        if size <= 0:
-            return 0
-        cache = self._line_count_cache
-        if cache and cache[0] == size and cache[1] == stat.st_mtime_ns:
-            return cache[2]
-        newline_count = 0
-        with self.path.open("rb") as file:
-            while True:
-                chunk = file.read(1024 * 1024)
-                if not chunk:
-                    break
-                newline_count += chunk.count(b"\n")
-            file.seek(size - 1)
-            tail = file.read(1)
-        total = newline_count if tail == b"\n" else newline_count + 1
-        self._line_count_cache = (size, stat.st_mtime_ns, total)
-        return total
-
-    def _line_count_for_type(self, type: str) -> int:
-        type_filter = self._clean(type)
-        if not type_filter:
-            return self._line_count()
-        if not self.path.exists():
-            return 0
-        stat = self.path.stat()
-        size = stat.st_size
-        if size <= 0:
-            return 0
-        cache = self._type_count_cache.get(type_filter)
-        if cache and cache[0] == size and cache[1] == stat.st_mtime_ns:
-            return cache[2]
-        needles = (
-            f'"type":"{type_filter}"'.encode("utf-8"),
-            f'"type": "{type_filter}"'.encode("utf-8"),
-        )
-        total = 0
-        with self.path.open("rb") as file:
-            for raw_line in file:
-                head = raw_line[:512]
-                if any(needle in head for needle in needles):
-                    total += 1
-        self._type_count_cache[type_filter] = (size, stat.st_mtime_ns, total)
-        return total
-
-    def _iter_raw_lines_reverse(self):
-        if not self.path.exists():
-            return
-        total_lines = self._line_count()
-        if total_lines <= 0:
-            return
-        line_number = total_lines - 1
-        buffer = b""
-        skipped_trailing_newline = False
-        with self.path.open("rb") as file:
-            position = file.seek(0, 2)
-            while position > 0:
-                read_size = min(1024 * 1024, position)
-                position -= read_size
-                file.seek(position)
-                buffer = file.read(read_size) + buffer
-                parts = buffer.split(b"\n")
-                buffer = parts[0]
-                for raw_line in reversed(parts[1:]):
-                    if (
-                        not skipped_trailing_newline
-                        and raw_line == b""
-                        and line_number == total_lines - 1
-                    ):
-                        skipped_trailing_newline = True
-                        continue
-                    skipped_trailing_newline = True
-                    if raw_line.endswith(b"\r"):
-                        raw_line = raw_line[:-1]
-                    yield raw_line.decode("utf-8", errors="ignore"), line_number
-                    line_number -= 1
-            if line_number >= 0:
-                if buffer.endswith(b"\r"):
-                    buffer = buffer[:-1]
-                yield buffer.decode("utf-8", errors="ignore"), line_number
-
-    def _iter_recent_raw_lines(self, max_items: int, total_lines: int | None = None):
-        if not self.path.exists() or max_items <= 0:
-            return
-        line_number = (total_lines - 1) if total_lines is not None else -1
-        buffer = b""
-        emitted = 0
-        skipped_trailing_newline = False
-        with self.path.open("rb") as file:
-            position = file.seek(0, 2)
-            while position > 0 and emitted < max_items:
-                read_size = min(1024 * 1024, position)
-                position -= read_size
-                file.seek(position)
-                buffer = file.read(read_size) + buffer
-                parts = buffer.split(b"\n")
-                buffer = parts[0]
-                for raw_line in reversed(parts[1:]):
-                    if not skipped_trailing_newline and raw_line == b"":
-                        skipped_trailing_newline = True
-                        continue
-                    skipped_trailing_newline = True
-                    if raw_line.endswith(b"\r"):
-                        raw_line = raw_line[:-1]
-                    yield raw_line.decode("utf-8", errors="ignore"), line_number
-                    emitted += 1
-                    line_number -= 1
-                    if emitted >= max_items:
-                        break
-            if emitted < max_items and buffer:
-                if buffer.endswith(b"\r"):
-                    buffer = buffer[:-1]
-                yield buffer.decode("utf-8", errors="ignore"), line_number
-
-    def _iter_parsed_reverse(self):
-        for raw_line, line_number in self._iter_raw_lines_reverse() or ():
-            item = self._parse_line(raw_line, line_number)
-            if item is not None:
-                yield item
-
-    def _iter_recent_parsed(self, max_items: int, total_lines: int | None = None):
-        for raw_line, line_number in self._iter_recent_raw_lines(max_items, total_lines=total_lines) or ():
-            item = self._parse_line(raw_line, line_number)
-            if item is not None:
-                yield item
-
-    @staticmethod
-    def _has_precise_query(
-        *,
-        start_date: str = "",
-        end_date: str = "",
-        status: str = "",
-        endpoint: str = "",
-        model: str = "",
-        account: str = "",
-        conversation_id: str = "",
-        search: str = "",
-    ) -> bool:
-        return any(
-            str(value or "").strip()
-            for value in (start_date, end_date, status, endpoint, model, account, conversation_id, search)
-        )
-
-    def _page_response(
-        self,
-        *,
-        items: list[dict[str, Any]],
-        total: int,
-        limit: int,
-        offset: int,
-        has_more: bool | None = None,
-        statuses: Counter[str],
-        endpoints: Counter[str],
-        models: Counter[str],
-        accounts: Counter[str],
-        stats: Counter,
-    ) -> dict[str, Any]:
-        return {
-            "items": items,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "has_more": offset + len(items) < total if has_more is None else has_more,
-            "facets": {
-                "statuses": dict(statuses),
-                "endpoints": dict(endpoints),
-                "models": dict(models),
-                "accounts": dict(accounts),
-            },
-            "stats": {
-                "total": total,
-                "success": int(stats["success"]),
-                "text_review": int(stats["text_review"]),
-                "failed": int(stats["failed"]),
-                "limited": int(stats["limited"]),
-                "image": int(stats["image"]),
-            },
-        }
-
-    def _accumulate_page_stats(
-        self,
-        item: dict[str, Any],
-        *,
-        statuses: Counter[str],
-        endpoints: Counter[str],
-        models: Counter[str],
-        accounts: Counter[str],
-        stats: Counter,
-    ) -> None:
-        status_label = self._clean(self._detail_value(item, "status")) or "unknown"
-        endpoint_label = self._clean(self._detail_value(item, "endpoint"))
-        model_label = self._clean(self._detail_value(item, "model"))
-        account_label = self._clean(self._detail_value(item, "account_email"))
-        statuses[status_label] += 1
-        if endpoint_label:
-            endpoints[endpoint_label] += 1
-        if model_label:
-            models[model_label] += 1
-        if account_label:
-            accounts[account_label] += 1
-
-        if self._is_text_review(item):
-            stats["text_review"] += 1
-        elif status_label.lower() == "success":
-            stats["success"] += 1
-        if self._is_failed(item):
-            stats["failed"] += 1
-        if self._is_limited(item):
-            stats["limited"] += 1
-        if self._is_image_log(item):
-            stats["image"] += 1
-
-    def _list_page_fast(self, *, type: str = "", limit: int, offset: int) -> dict[str, Any]:
-        total_lines = self._line_count()
-        type_filter = self._clean(type)
-        total = self._line_count_for_type(type_filter)
-        target_count = offset + limit + 1
-        matched: list[dict[str, Any]] = []
-        for item in self._iter_recent_parsed(total_lines, total_lines=total_lines) or ():
-            if type_filter and item.get("type") != type_filter:
-                continue
-            matched.append(item)
-            if len(matched) >= target_count:
-                break
-        has_more = len(matched) > offset + limit
-        items = matched[offset:offset + limit]
-        statuses: Counter[str] = Counter()
-        endpoints: Counter[str] = Counter()
-        models: Counter[str] = Counter()
-        accounts: Counter[str] = Counter()
-        stats = Counter()
-        for item in items:
-            self._accumulate_page_stats(
-                item,
-                statuses=statuses,
-                endpoints=endpoints,
-                models=models,
-                accounts=accounts,
-                stats=stats,
-            )
-        stats["total"] = total
-        response = self._page_response(
-            items=items,
-            total=total,
-            limit=limit,
-            offset=offset,
-            has_more=has_more if type_filter else None,
-            statuses=statuses,
-            endpoints=endpoints,
-            models=models,
-            accounts=accounts,
-            stats=stats,
-        )
-        response["facets_scope"] = "page"
-        response["stats_scope"] = "page"
-        if type_filter:
-            response["total_scope"] = "type_count"
-        return response
-
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
@@ -489,25 +268,15 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
-        with self._lock:
-            with self.path.open("a", encoding="utf-8") as file:
-                file.write(self._serialize_item(item) + "\n")
+        self._queue.put(self._store_record(item))
         if type == LOG_TYPE_CALL:
             from services.dashboard_metrics_service import safe_record_dashboard_call
 
             safe_record_dashboard_call(item)
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        items: list[dict[str, Any]] = []
-        for item in self._iter_parsed_reverse():
-            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
-                continue
-            items.append(item)
-            if len(items) >= limit:
-                break
-        return items
+        self.flush()
+        return self.store.list_details(type=type, start_date=start_date, end_date=end_date, limit=limit)
 
     def list_page(
         self,
@@ -524,9 +293,9 @@ class LogService:
         limit: int = 200,
         offset: int = 0,
     ) -> dict[str, Any]:
-        safe_limit = max(1, min(int(limit or 200), 20000))
-        safe_offset = max(0, int(offset or 0))
-        if not self._has_precise_query(
+        self.flush()
+        return self.store.list_page(
+            type=type,
             start_date=start_date,
             end_date=end_date,
             status=status,
@@ -535,159 +304,48 @@ class LogService:
             account=account,
             conversation_id=conversation_id,
             search=search,
-        ):
-            return self._list_page_fast(type=type, limit=safe_limit, offset=safe_offset)
-
-        items: list[dict[str, Any]] = []
-        total = 0
-        statuses: Counter[str] = Counter()
-        endpoints: Counter[str] = Counter()
-        models: Counter[str] = Counter()
-        accounts: Counter[str] = Counter()
-        stats = Counter()
-
-        for item in self._iter_parsed_reverse() or ():
-            if not self._matches_extended_filters(
-                item,
-                type=type,
-                start_date=start_date,
-                end_date=end_date,
-                status=status,
-                endpoint=endpoint,
-                model=model,
-                account=account,
-                conversation_id=conversation_id,
-                search=search,
-            ):
-                continue
-
-            total += 1
-            self._accumulate_page_stats(
-                item,
-                statuses=statuses,
-                endpoints=endpoints,
-                models=models,
-                accounts=accounts,
-                stats=stats,
-            )
-
-            if total <= safe_offset:
-                continue
-            if len(items) < safe_limit:
-                items.append(item)
-
-        return self._page_response(
-            items=items,
-            total=total,
-            limit=safe_limit,
-            offset=safe_offset,
-            has_more=None,
-            statuses=statuses,
-            endpoints=endpoints,
-            models=models,
-            accounts=accounts,
-            stats=stats,
+            limit=limit,
+            offset=offset,
         )
 
+    def get(self, id: str) -> dict[str, Any] | None:
+        self.flush()
+        return self.store.get(id)
+
     def delete(self, ids: list[str]) -> dict[str, int]:
-        target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
-        if not self.path.exists() or not target_ids:
-            return {"removed": 0}
-        with self._lock:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-            kept_lines: list[str] = []
-            removed = 0
-            for line_number, raw_line in enumerate(lines):
-                item = self._parse_line(raw_line, line_number)
-                if item is None:
-                    kept_lines.append(raw_line)
-                    continue
-                if str(item.get("id") or "") in target_ids:
-                    removed += 1
-                    continue
-                kept_lines.append(self._serialize_item(item))
-            content = "\n".join(kept_lines)
-            if content:
-                content += "\n"
-            self.path.write_text(content, encoding="utf-8")
-        return {"removed": removed}
+        self.flush()
+        return {"removed": self.store.delete(ids)}
 
-    def _cleanup_old(self, retention_days: int, *, dry_run: bool) -> dict[str, int | bool]:
-        if not self.path.exists():
-            return {"removed": 0, "kept": 0, "removed_size_bytes": 0, "dry_run": dry_run}
+    def _cleanup_old(self, retention_hours: int, *, dry_run: bool) -> dict[str, int | bool]:
+        self.flush()
         try:
-            days = max(1, int(retention_days))
+            hours = max(1, int(retention_hours))
         except (TypeError, ValueError):
-            days = 30
-        cutoff = time.time() - days * 86400
-        with self._lock:
-            removed = 0
-            kept = 0
-            removed_size_bytes = 0
-            temp_path = self.path.with_name(f"{self.path.name}.cleanup-{uuid4().hex}.tmp")
-            try:
-                output_file = None if dry_run else temp_path.open("w", encoding="utf-8", newline="\n")
-                try:
-                    with self.path.open("r", encoding="utf-8", errors="ignore") as input_file:
-                        for line_number, raw_line in enumerate(input_file):
-                            raw_line_clean = raw_line.rstrip("\n").rstrip("\r")
-                            item = self._parse_line(raw_line_clean, line_number)
-                            timestamp = self._timestamp(item) if item is not None else None
-                            if timestamp is not None and timestamp < cutoff:
-                                removed += 1
-                                removed_size_bytes += len(raw_line.encode("utf-8", errors="ignore"))
-                                continue
-                            kept += 1
-                            if output_file is not None:
-                                output_file.write((self._serialize_item(item) if item is not None else raw_line_clean) + "\n")
-                finally:
-                    if output_file is not None:
-                        output_file.close()
+            hours = 720
+        cutoff_ms = int((time.time() - hours * 3600) * 1000)
+        stats = self.store.cleanup_stats(cutoff_ms)
+        removed = 0
+        if not dry_run:
+            while True:
+                count = self.store.delete_expired_batch(cutoff_ms, limit=1000)
+                removed += count
+                if count < 1000:
+                    break
+        return {
+            "removed": stats["count"] if dry_run else removed,
+            "removed_size_bytes": stats["size"],
+            "retention_hours": hours,
+            "dry_run": dry_run,
+        }
 
-                if not dry_run:
-                    if removed:
-                        temp_path.replace(self.path)
-                    elif temp_path.exists():
-                        temp_path.unlink()
-            except Exception:
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except OSError:
-                        pass
-                raise
-        return {"removed": removed, "kept": kept, "removed_size_bytes": removed_size_bytes, "dry_run": dry_run}
+    def preview_cleanup_old(self, retention_hours: int) -> dict[str, int | bool]:
+        return self._cleanup_old(retention_hours, dry_run=True)
 
-    def preview_cleanup_old(self, retention_days: int) -> dict[str, int | bool]:
-        return self._cleanup_old(retention_days, dry_run=True)
-
-    def cleanup_old(self, retention_days: int) -> dict[str, int | bool]:
-        return self._cleanup_old(retention_days, dry_run=False)
+    def cleanup_old(self, retention_hours: int) -> dict[str, int | bool]:
+        return self._cleanup_old(retention_hours, dry_run=False)
 
 
-log_service = LogService(DATA_DIR / "logs.jsonl")
-
-
-def cleanup_old_logs() -> dict[str, int]:
-    from services.config import config
-
-    return log_service.cleanup_old(config.log_retention_days)
-
-
-def _auto_cleanup_worker(stop_event: threading.Event) -> None:
-    while not stop_event.wait(1800):
-        try:
-            result = cleanup_old_logs()
-            if int(result.get("removed") or 0) > 0:
-                logger.info({"event": "log_auto_cleanup_done", **result})
-        except Exception as exc:
-            logger.error({"event": "log_auto_cleanup_failed", "error": str(exc)})
-
-
-def start_log_cleanup_scheduler(stop_event: threading.Event) -> threading.Thread:
-    thread = threading.Thread(target=_auto_cleanup_worker, args=(stop_event,), daemon=True, name="log-cleanup")
-    thread.start()
-    return thread
+log_service = LogService()
 
 
 def _collect_urls(value: object) -> list[str]:

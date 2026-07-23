@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import math
 import os
 import threading
 from pathlib import Path
-import time
 
 from services.json_file import read_json_object, write_json_file
 from services.storage.base import StorageBackend
@@ -84,6 +84,111 @@ DEFAULT_THIRD_PARTY_APPS = {
     },
 }
 
+SETTINGS_UPDATE_KEYS = frozenset({
+    "proxy",
+    "fallback_proxy",
+    "proxy_runtime",
+    "base_url",
+    "refresh_account_interval_minute",
+    "image_retention_hours",
+    "log_retention_hours",
+    "image_poll_timeout_secs",
+    "image_stream_timeout_secs",
+    "image_poll_interval_secs",
+    "image_poll_initial_wait_secs",
+    "image_account_concurrency",
+    "image_account_retry_enabled",
+    "image_preflight_token_refresh_enabled",
+    "image_upscale_enabled",
+    "image_upscale_engine",
+    "image_auth_refresh_concurrency",
+    "image_max_account_attempts",
+    "image_parallel_generation",
+    "image_remove_conversation_after_result",
+    "image_settle_enabled",
+    "image_check_before_hit_enabled",
+    "image_settle_secs",
+    "auto_remove_invalid_accounts",
+    "auto_remove_rate_limited_accounts",
+    "log_levels",
+    "global_system_prompt",
+    "sensitive_words",
+    "ai_review",
+    "image_generation",
+    "quota_limits",
+    "runtime_capacity",
+    "image_storage",
+    "backup",
+    "chat_completion_cache",
+    "third_party_apps",
+})
+
+DEFAULT_SETTINGS: dict[str, object] = {
+    "proxy": "",
+    "fallback_proxy": "",
+    "base_url": "",
+    "refresh_account_interval_minute": 5,
+    "image_retention_hours": 360,
+    "log_retention_hours": 720,
+    "image_poll_timeout_secs": 60,
+    "image_stream_timeout_secs": 80,
+    "image_poll_interval_secs": 10.0,
+    "image_poll_initial_wait_secs": 10.0,
+    "image_account_concurrency": 1,
+    "image_account_retry_enabled": True,
+    "image_preflight_token_refresh_enabled": False,
+    "image_upscale_enabled": False,
+    "image_upscale_engine": "sharp_lanczos3",
+    "image_auth_refresh_concurrency": 10,
+    "image_max_account_attempts": 4,
+    "image_parallel_generation": True,
+    "image_remove_conversation_after_result": False,
+    "image_settle_enabled": True,
+    "image_check_before_hit_enabled": True,
+    "image_settle_secs": 5.0,
+    "auto_remove_invalid_accounts": True,
+    "auto_remove_rate_limited_accounts": False,
+    "log_levels": [],
+    "global_system_prompt": "",
+    "sensitive_words": [],
+}
+
+DEFAULT_AI_REVIEW = {
+    "enabled": False,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "prompt": "",
+    "fail_open": True,
+}
+
+DEFAULT_IMAGE_GENERATION = {
+    "enabled": True,
+    "supported_models": [],
+    "model_options": [],
+    "block_rich_output_on_base_chat_models": True,
+    "output_format": "url",
+    "nanobanana_lane": "fast",
+    "nanobanana_lane_order": ["fast"],
+}
+
+DEFAULT_QUOTA_LIMITS = {
+    "enabled": True,
+    "fast_daily_limit": -1,
+    "thinking_daily_limit": -1,
+    "pro_daily_limit": -1,
+    "image_daily_limit": -1,
+    "music_daily_limit": -1,
+    "video_daily_limit": -1,
+}
+
+DEFAULT_RUNTIME_CAPACITY = {
+    "uvicorn_workers": 4,
+    "text_concurrency_limit": 120,
+    "image_concurrency_limit": 24,
+    "request_queue_timeout_seconds": 2.0,
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -106,6 +211,42 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     return max(minimum, normalized)
 
 
+def _normalize_number(
+    value: object,
+    default: int | float,
+    *,
+    minimum: int | float | None = None,
+    maximum: int | float | None = None,
+    integer: bool = False,
+) -> int | float:
+    if isinstance(value, bool):
+        normalized = float(default)
+    else:
+        try:
+            normalized = float(value)
+        except (OverflowError, TypeError, ValueError):
+            normalized = float(default)
+    if not math.isfinite(normalized):
+        normalized = float(default)
+    if minimum is not None:
+        normalized = max(float(minimum), normalized)
+    if maximum is not None:
+        normalized = min(float(maximum), normalized)
+    return int(normalized) if integer else normalized
+
+
+def _normalize_string_list(value: object, *, allowed: set[str] | None = None) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or (allowed is not None and text not in allowed) or text in normalized:
+            continue
+        normalized.append(text)
+    return normalized
+
+
 def _normalize_backup_include(value: object) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     normalized = dict(DEFAULT_BACKUP_INCLUDE)
@@ -124,7 +265,7 @@ def _normalize_backup_settings(value: object) -> dict[str, object]:
         "secret_access_key": str(source.get("secret_access_key") or "").strip(),
         "bucket": str(source.get("bucket") or "").strip(),
         "prefix": str(source.get("prefix") or "backups").strip().strip("/") or "backups",
-        "interval_minutes": _normalize_positive_int(source.get("interval_minutes"), 360, 1),
+        "interval_minutes": _normalize_positive_int(source.get("interval_minutes"), 1440, 1),
         "rotation_keep": _normalize_positive_int(source.get("rotation_keep"), 10, 0),
         "encrypt": _normalize_bool(source.get("encrypt"), False),
         "passphrase": str(source.get("passphrase") or "").strip(),
@@ -289,17 +430,186 @@ def _normalize_third_party_apps_settings(value: object) -> dict[str, object]:
     }
 
 
+def _normalize_ai_review_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), bool(DEFAULT_AI_REVIEW["enabled"])),
+        "base_url": str(source.get("base_url") or "").strip().rstrip("/"),
+        "api_key": str(source.get("api_key") or "").strip(),
+        "model": str(source.get("model") or "").strip(),
+        "prompt": str(source.get("prompt") or "").strip(),
+        "fail_open": _normalize_bool(source.get("fail_open"), bool(DEFAULT_AI_REVIEW["fail_open"])),
+    }
+
+
+def _normalize_image_generation_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    output_format = str(source.get("output_format") or DEFAULT_IMAGE_GENERATION["output_format"]).strip().lower()
+    if output_format not in {"url", "base64"}:
+        output_format = str(DEFAULT_IMAGE_GENERATION["output_format"])
+
+    allowed_lanes = {"fast", "thinking", "pro"}
+    lane = str(source.get("nanobanana_lane") or DEFAULT_IMAGE_GENERATION["nanobanana_lane"]).strip().lower()
+    if lane not in allowed_lanes:
+        lane = str(DEFAULT_IMAGE_GENERATION["nanobanana_lane"])
+    raw_lane_order = source.get("nanobanana_lane_order")
+    lane_order = _normalize_string_list(
+        [str(item or "").strip().lower() for item in raw_lane_order]
+        if isinstance(raw_lane_order, list)
+        else raw_lane_order,
+        allowed=allowed_lanes,
+    )
+    if not lane_order:
+        lane_order = list(DEFAULT_IMAGE_GENERATION["nanobanana_lane_order"])
+
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), bool(DEFAULT_IMAGE_GENERATION["enabled"])),
+        "supported_models": _normalize_string_list(source.get("supported_models")),
+        "model_options": _normalize_string_list(source.get("model_options")),
+        "block_rich_output_on_base_chat_models": _normalize_bool(
+            source.get("block_rich_output_on_base_chat_models"),
+            bool(DEFAULT_IMAGE_GENERATION["block_rich_output_on_base_chat_models"]),
+        ),
+        "output_format": output_format,
+        "nanobanana_lane": lane,
+        "nanobanana_lane_order": lane_order,
+    }
+
+
+def _normalize_quota_limits_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    normalized: dict[str, object] = {
+        "enabled": _normalize_bool(source.get("enabled"), bool(DEFAULT_QUOTA_LIMITS["enabled"])),
+    }
+    for key in (
+        "fast_daily_limit",
+        "thinking_daily_limit",
+        "pro_daily_limit",
+        "image_daily_limit",
+        "music_daily_limit",
+        "video_daily_limit",
+    ):
+        normalized[key] = _normalize_number(
+            source.get(key),
+            int(DEFAULT_QUOTA_LIMITS[key]),
+            minimum=-1,
+            integer=True,
+        )
+    return normalized
+
+
+def _normalize_runtime_capacity_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "uvicorn_workers": _normalize_number(
+            source.get("uvicorn_workers"),
+            int(DEFAULT_RUNTIME_CAPACITY["uvicorn_workers"]),
+            minimum=1,
+            integer=True,
+        ),
+        "text_concurrency_limit": _normalize_number(
+            source.get("text_concurrency_limit"),
+            int(DEFAULT_RUNTIME_CAPACITY["text_concurrency_limit"]),
+            minimum=1,
+            integer=True,
+        ),
+        "image_concurrency_limit": _normalize_number(
+            source.get("image_concurrency_limit"),
+            int(DEFAULT_RUNTIME_CAPACITY["image_concurrency_limit"]),
+            minimum=1,
+            integer=True,
+        ),
+        "request_queue_timeout_seconds": _normalize_number(
+            source.get("request_queue_timeout_seconds"),
+            float(DEFAULT_RUNTIME_CAPACITY["request_queue_timeout_seconds"]),
+            minimum=0.1,
+        ),
+    }
+
+
+def normalize_settings_payload(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    upscale_engine = str(source.get("image_upscale_engine") or DEFAULT_SETTINGS["image_upscale_engine"]).strip().lower()
+    if upscale_engine not in {"sharp_lanczos3", "pillow_lanczos"}:
+        upscale_engine = str(DEFAULT_SETTINGS["image_upscale_engine"])
+
+    allowed_log_levels = {"debug", "info", "warning", "error"}
+    log_levels = [
+        level.lower()
+        for level in _normalize_string_list(source.get("log_levels"))
+        if level.lower() in allowed_log_levels
+    ]
+
+    return {
+        "proxy": str(source.get("proxy") or "").strip(),
+        "fallback_proxy": str(source.get("fallback_proxy") or "").strip(),
+        "proxy_runtime": _normalize_proxy_runtime_settings(source.get("proxy_runtime")),
+        "base_url": str(source.get("base_url") or "").strip().rstrip("/"),
+        "refresh_account_interval_minute": _normalize_number(
+            source.get("refresh_account_interval_minute"), 5, minimum=1, integer=True
+        ),
+        "image_retention_hours": _normalize_number(
+            source.get("image_retention_hours"), 360, minimum=1, integer=True
+        ),
+        "log_retention_hours": _normalize_number(
+            source.get("log_retention_hours"), 720, minimum=1, integer=True
+        ),
+        "image_poll_timeout_secs": _normalize_number(
+            source.get("image_poll_timeout_secs"), 60, minimum=1, integer=True
+        ),
+        "image_stream_timeout_secs": _normalize_number(
+            source.get("image_stream_timeout_secs"), 80, minimum=1, integer=True
+        ),
+        "image_poll_interval_secs": _normalize_number(
+            source.get("image_poll_interval_secs"), 10.0, minimum=0.5
+        ),
+        "image_poll_initial_wait_secs": _normalize_number(
+            source.get("image_poll_initial_wait_secs"), 10.0, minimum=0.0
+        ),
+        "image_account_concurrency": _normalize_number(
+            source.get("image_account_concurrency"), 1, minimum=1, maximum=3, integer=True
+        ),
+        "image_account_retry_enabled": _normalize_bool(source.get("image_account_retry_enabled"), True),
+        "image_preflight_token_refresh_enabled": _normalize_bool(
+            source.get("image_preflight_token_refresh_enabled"), False
+        ),
+        "image_upscale_enabled": _normalize_bool(source.get("image_upscale_enabled"), False),
+        "image_upscale_engine": upscale_engine,
+        "image_auth_refresh_concurrency": _normalize_number(
+            source.get("image_auth_refresh_concurrency"), 10, minimum=1, integer=True
+        ),
+        "image_max_account_attempts": _normalize_number(
+            source.get("image_max_account_attempts"), 4, minimum=2, integer=True
+        ),
+        "image_parallel_generation": _normalize_bool(source.get("image_parallel_generation"), True),
+        "image_remove_conversation_after_result": _normalize_bool(
+            source.get("image_remove_conversation_after_result"), False
+        ),
+        "image_settle_enabled": _normalize_bool(source.get("image_settle_enabled"), True),
+        "image_check_before_hit_enabled": _normalize_bool(source.get("image_check_before_hit_enabled"), True),
+        "image_settle_secs": _normalize_number(source.get("image_settle_secs"), 5.0, minimum=0.5),
+        "auto_remove_invalid_accounts": _normalize_bool(source.get("auto_remove_invalid_accounts"), True),
+        "auto_remove_rate_limited_accounts": _normalize_bool(
+            source.get("auto_remove_rate_limited_accounts"), False
+        ),
+        "log_levels": list(dict.fromkeys(log_levels)),
+        "global_system_prompt": str(source.get("global_system_prompt") or "").strip(),
+        "sensitive_words": _normalize_string_list(source.get("sensitive_words")),
+        "ai_review": _normalize_ai_review_settings(source.get("ai_review")),
+        "image_generation": _normalize_image_generation_settings(source.get("image_generation")),
+        "quota_limits": _normalize_quota_limits_settings(source.get("quota_limits")),
+        "runtime_capacity": _normalize_runtime_capacity_settings(source.get("runtime_capacity")),
+        "image_storage": _normalize_image_storage_settings(source.get("image_storage")),
+        "backup": _normalize_backup_settings(source.get("backup")),
+        "chat_completion_cache": _normalize_chat_completion_cache_settings(source.get("chat_completion_cache")),
+        "third_party_apps": _normalize_third_party_apps_settings(source.get("third_party_apps")),
+    }
+
+
 def _legacy_basic_from_settings(value: object, settings: dict[str, object]) -> dict[str, object]:
     source = dict(value) if isinstance(value, dict) else {}
     source["proxy"] = str(settings.get("proxy") or "").strip()
     source["base_url"] = str(settings.get("base_url") or "").strip().rstrip("/")
-    try:
-        source["image_expire_hours"] = max(
-            1,
-            int(settings.get("image_retention_days", source.get("image_expire_hours", 30)) or 30),
-        )
-    except (TypeError, ValueError):
-        source["image_expire_hours"] = 30
     return source
 
 
@@ -312,9 +622,14 @@ def _promote_legacy_basic_settings(data: dict[str, object]) -> dict[str, object]
         next_data["proxy"] = str(basic.get("proxy") or "").strip()
     if "base_url" not in next_data and "base_url" in basic:
         next_data["base_url"] = str(basic.get("base_url") or "").strip().rstrip("/")
-    if "image_retention_days" not in next_data and "image_expire_hours" in basic:
-        next_data["image_retention_days"] = basic.get("image_expire_hours")
     return next_data
+
+
+def _normalize_config_data(value: object) -> dict[str, object]:
+    data = _promote_legacy_basic_settings(dict(value) if isinstance(value, dict) else {})
+    data.update(normalize_settings_payload(data))
+    data["basic"] = _legacy_basic_from_settings(data.get("basic"), data)
+    return data
 
 
 def _validate_image_storage_settings(settings: dict[str, object]) -> None:
@@ -366,7 +681,7 @@ class ConfigStore:
         self.path = path
         self._lock = threading.RLock()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.data = _promote_legacy_basic_settings(self._load())
+        self.data = _normalize_config_data(self._load())
         self._loaded_mtime_ns = self._config_mtime_ns()
         self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
@@ -392,7 +707,7 @@ class ConfigStore:
         with self._lock:
             current_mtime_ns = self._config_mtime_ns()
             if current_mtime_ns and current_mtime_ns != self._loaded_mtime_ns:
-                self.data = _promote_legacy_basic_settings(self._load())
+                self.data = _normalize_config_data(self._load())
                 self._loaded_mtime_ns = current_mtime_ns
 
     def _save(self) -> None:
@@ -409,174 +724,118 @@ class ConfigStore:
 
     @property
     def refresh_account_interval_minute(self) -> int:
-        try:
-            return int(self.data.get("refresh_account_interval_minute", 5))
-        except (TypeError, ValueError):
-            return 5
+        return int(self.data["refresh_account_interval_minute"])
 
     @property
-    def image_retention_days(self) -> int:
-        try:
-            return max(1, int(self.data.get("image_retention_days", 30)))
-        except (TypeError, ValueError):
-            return 30
+    def image_retention_hours(self) -> int:
+        return int(self.data["image_retention_hours"])
 
     @property
-    def log_retention_days(self) -> int:
-        try:
-            return max(1, int(self.data.get("log_retention_days", 30)))
-        except (TypeError, ValueError):
-            return 30
+    def log_retention_hours(self) -> int:
+        return int(self.data["log_retention_hours"])
 
     @property
     def image_poll_timeout_secs(self) -> int:
         self.reload_if_changed()
-        try:
-            return max(1, int(self.data.get("image_poll_timeout_secs", 60)))
-        except (TypeError, ValueError):
-            return 60
+        return int(self.data["image_poll_timeout_secs"])
 
     @property
     def image_stream_timeout_secs(self) -> int:
         self.reload_if_changed()
-        try:
-            return max(1, int(self.data.get("image_stream_timeout_secs", 80)))
-        except (TypeError, ValueError):
-            return 80
+        return int(self.data["image_stream_timeout_secs"])
 
     @property
     def image_poll_interval_secs(self) -> float:
-        try:
-            return max(0.5, float(self.data.get("image_poll_interval_secs", 10.0)))
-        except (TypeError, ValueError):
-            return 10.0
+        return float(self.data["image_poll_interval_secs"])
 
     @property
     def image_poll_initial_wait_secs(self) -> float:
         """Image generation upstream takes ~30s; polling immediately wastes requests
         and trips a transient 429. Default 10s gives the conversation document time
         to commit before the first poll."""
-        try:
-            return max(0.0, float(self.data.get("image_poll_initial_wait_secs", 10.0)))
-        except (TypeError, ValueError):
-            return 10.0
+        return float(self.data["image_poll_initial_wait_secs"])
 
     @property
     def image_account_concurrency(self) -> int:
-        try:
-            return min(3, max(1, int(self.data.get("image_account_concurrency", 1))))
-        except (TypeError, ValueError):
-            return 1
+        return int(self.data["image_account_concurrency"])
 
     @property
     def image_account_retry_enabled(self) -> bool:
         self.reload_if_changed()
-        return _normalize_bool(self.data.get("image_account_retry_enabled"), True)
+        return bool(self.data["image_account_retry_enabled"])
 
     @property
     def image_preflight_token_refresh_enabled(self) -> bool:
         self.reload_if_changed()
-        return _normalize_bool(self.data.get("image_preflight_token_refresh_enabled"), False)
+        return bool(self.data["image_preflight_token_refresh_enabled"])
 
     @property
     def image_upscale_enabled(self) -> bool:
         self.reload_if_changed()
-        return _normalize_bool(self.data.get("image_upscale_enabled"), False)
+        return bool(self.data["image_upscale_enabled"])
 
     @property
     def image_upscale_engine(self) -> str:
         self.reload_if_changed()
-        value = str(self.data.get("image_upscale_engine") or "sharp_lanczos3").strip().lower()
-        return value if value in {"sharp_lanczos3", "pillow_lanczos"} else "sharp_lanczos3"
+        return str(self.data["image_upscale_engine"])
 
     @property
     def image_auth_refresh_concurrency(self) -> int:
         self.reload_if_changed()
-        return _normalize_positive_int(
-            self.data.get("image_auth_refresh_concurrency"),
-            10,
-            1,
-        )
+        return int(self.data["image_auth_refresh_concurrency"])
 
     @property
     def image_max_account_attempts(self) -> int:
         self.reload_if_changed()
-        try:
-            return max(2, int(self.data.get("image_max_account_attempts", 4)))
-        except (TypeError, ValueError):
-            return 4
+        return int(self.data["image_max_account_attempts"])
 
     @property
     def image_parallel_generation(self) -> bool:
-        value = self.data.get("image_parallel_generation", True)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+        return bool(self.data["image_parallel_generation"])
 
     @property
     def image_remove_conversation_after_result(self) -> bool:
         self.reload_if_changed()
-        return _normalize_bool(self.data.get("image_remove_conversation_after_result"), False)
+        return bool(self.data["image_remove_conversation_after_result"])
 
     @property
     def image_settle_enabled(self) -> bool:
         """图片二次确认机制：找到 file_ids 后等待一段时间再次确认。"""
-        value = self.data.get("image_settle_enabled", True)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+        return bool(self.data["image_settle_enabled"])
 
     @property
     def image_check_before_hit_enabled(self) -> bool:
         """先check再hit：通过轮询确认 file_ids 存在后再返回，而非仅依赖 SSE 事件。"""
-        value = self.data.get("image_check_before_hit_enabled", True)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+        return bool(self.data["image_check_before_hit_enabled"])
 
     @property
     def image_settle_secs(self) -> float:
         """二次确认等待时间（秒）。"""
-        try:
-            return max(0.5, float(self.data.get("image_settle_secs", 5.0)))
-        except (TypeError, ValueError):
-            return 5.0
+        return float(self.data["image_settle_secs"])
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
-        value = self.data.get("auto_remove_invalid_accounts", True)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+        return bool(self.data["auto_remove_invalid_accounts"])
 
     @property
     def auto_remove_rate_limited_accounts(self) -> bool:
-        value = self.data.get("auto_remove_rate_limited_accounts", False)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+        return bool(self.data["auto_remove_rate_limited_accounts"])
 
     @property
     def log_levels(self) -> list[str]:
-        levels = self.data.get("log_levels")
-        if not isinstance(levels, list):
-            return []
-        allowed = {"debug", "info", "warning", "error"}
-        return [level for item in levels if (level := str(item or "").strip().lower()) in allowed]
+        return list(self.data["log_levels"])
 
     @property
     def sensitive_words(self) -> list[str]:
-        words = self.data.get("sensitive_words")
-        return [word for item in words if (word := str(item or "").strip())] if isinstance(words, list) else []
+        return list(self.data["sensitive_words"])
 
     @property
     def ai_review(self) -> dict[str, object]:
-        value = self.data.get("ai_review")
-        return value if isinstance(value, dict) else {}
+        return dict(self.data["ai_review"])
 
     @property
     def global_system_prompt(self) -> str:
-        return str(self.data.get("global_system_prompt") or "").strip()
+        return str(self.data["global_system_prompt"])
 
     @property
     def images_dir(self) -> Path:
@@ -589,20 +848,6 @@ class ConfigStore:
         path = DATA_DIR / "image_thumbnails"
         path.mkdir(parents=True, exist_ok=True)
         return path
-
-    def cleanup_old_images(self) -> int:
-        cutoff = time.time() - self.image_retention_days * 86400
-        removed = 0
-        for path in self.images_dir.rglob("*"):
-            if path.is_file() and path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
-        for path in sorted((p for p in self.images_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
-            try:
-                path.rmdir()
-            except OSError:
-                pass
-        return removed
 
     @property
     def base_url(self) -> str:
@@ -623,38 +868,15 @@ class ConfigStore:
     def get(self) -> dict[str, object]:
         with self._lock:
             self.reload_if_changed()
-            data = dict(self.data)
-            data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
-            data["image_retention_days"] = self.image_retention_days
-            data["log_retention_days"] = self.log_retention_days
-            data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
-            data["image_stream_timeout_secs"] = self.image_stream_timeout_secs
-            data["image_poll_interval_secs"] = self.image_poll_interval_secs
-            data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
-            data["image_account_concurrency"] = self.image_account_concurrency
-            data["image_account_retry_enabled"] = self.image_account_retry_enabled
-            data["image_preflight_token_refresh_enabled"] = self.image_preflight_token_refresh_enabled
-            data["image_upscale_enabled"] = self.image_upscale_enabled
-            data["image_upscale_engine"] = self.image_upscale_engine
-            data["image_auth_refresh_concurrency"] = self.image_auth_refresh_concurrency
-            data["image_max_account_attempts"] = self.image_max_account_attempts
-            data["image_parallel_generation"] = self.image_parallel_generation
-            data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
-            data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
-            data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
-            data["log_levels"] = self.log_levels
-            data["sensitive_words"] = self.sensitive_words
-            data["ai_review"] = self.ai_review
-            data["global_system_prompt"] = self.global_system_prompt
-            data["backup"] = self.get_backup_settings()
-            data["image_storage"] = self.get_image_storage_settings()
-            data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
+            data = copy.deepcopy(self.data)
             data["proxy_runtime"] = self.get_public_proxy_runtime_settings()
-            data["fallback_proxy"] = self.get_proxy_fallback_settings()
-            data["third_party_apps"] = self.get_third_party_apps_settings()
             data["basic"] = _legacy_basic_from_settings(data.get("basic"), data)
             data.pop("auth-key", None)
             return data
+
+    def get_public_settings(self) -> dict[str, object]:
+        data = self.get()
+        return {key: copy.deepcopy(data[key]) for key in SETTINGS_UPDATE_KEYS}
 
     def get_proxy_settings(self) -> str:
         return str(self.data.get("proxy") or "").strip()
@@ -683,20 +905,8 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         with self._lock:
             self.reload_if_changed()
-            next_data = _promote_legacy_basic_settings(self.data)
+            next_data = dict(self.data)
             next_data.update(_promote_legacy_basic_settings(dict(data or {})))
-            next_data = _promote_legacy_basic_settings(next_data)
-            if "backup" in next_data:
-                next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
-            if "image_storage" in next_data:
-                next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
-                _validate_image_storage_settings(next_data["image_storage"])
-            if "chat_completion_cache" in next_data:
-                next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
-                    next_data.get("chat_completion_cache")
-                )
-            if "third_party_apps" in next_data:
-                next_data["third_party_apps"] = _normalize_third_party_apps_settings(next_data.get("third_party_apps"))
             if "proxy_runtime" in next_data:
                 incoming_runtime = next_data.get("proxy_runtime")
                 if isinstance(incoming_runtime, dict):
@@ -706,11 +916,18 @@ class ConfigStore:
                         incoming_runtime["_existing_cf_cookies"] = previous_clearance.get("cf_cookies")
                         incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
                 next_data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
-            next_data["basic"] = _legacy_basic_from_settings(next_data.get("basic"), next_data)
+            next_data = _normalize_config_data(next_data)
+            _validate_image_storage_settings(dict(next_data["image_storage"]))
             next_data.pop("backup_state", None)
             self.data = next_data
             self._save()
         return self.get()
+
+    def update_settings(self, data: dict[str, object]) -> dict[str, object]:
+        updates = {key: value for key, value in dict(data or {}).items() if key in SETTINGS_UPDATE_KEYS}
+        if updates:
+            self.update(updates)
+        return self.get_public_settings()
 
     def get_backup_settings(self) -> dict[str, object]:
         return _normalize_backup_settings(self.data.get("backup"))

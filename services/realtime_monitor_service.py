@@ -175,6 +175,9 @@ class RealtimeMonitorService:
         self._lock = Lock()
         self._active: dict[str, dict[str, Any]] = {}
         self._completed: deque[dict[str, Any]] = deque(maxlen=completed_limit)
+        self._finished_call_ids: set[str] = set()
+        self._finished_call_order: deque[str] = deque()
+        self._finished_call_limit = completed_limit
         self._events: deque[dict[str, Any]] = deque(maxlen=event_limit)
         self._threadpool: dict[str, int] = {
             "tokens": _env_int("CHATGPT2API_THREAD_TOKENS", 80, 1),
@@ -221,6 +224,8 @@ class RealtimeMonitorService:
             "images": {},
         }
         with self._lock:
+            if call_id in self._finished_call_ids:
+                return
             self._active[call_id] = record
             self._events.append(self._event(call_id, "handler_submitted", record))
 
@@ -233,6 +238,8 @@ class RealtimeMonitorService:
             return
         now = time.time()
         with self._lock:
+            if call_id in self._finished_call_ids:
+                return
             record = self._active.get(call_id)
             if record is None:
                 record = {
@@ -297,6 +304,9 @@ class RealtimeMonitorService:
         stage = "completed" if status == "success" else status if status == "text_review" else "failed"
         stage_label = "文本" if status == "text_review" else STAGE_LABELS[stage]
         with self._lock:
+            if call_id in self._finished_call_ids:
+                return
+            self._remember_finished_call(call_id)
             record = self._active.pop(call_id, None)
             if record is None:
                 now = time.time()
@@ -372,6 +382,13 @@ class RealtimeMonitorService:
                         detail[key] = diagnostic[key]
             self._completed.append(self._copy_record(record))
             self._events.append(self._event(call_id, str(record["stage"]), record))
+
+    def _remember_finished_call(self, call_id: str) -> None:
+        while len(self._finished_call_order) >= self._finished_call_limit:
+            expired = self._finished_call_order.popleft()
+            self._finished_call_ids.discard(expired)
+        self._finished_call_order.append(call_id)
+        self._finished_call_ids.add(call_id)
 
     def detail(self, call_id: str) -> dict[str, Any]:
         call_id = str(call_id or "").strip()
@@ -733,6 +750,11 @@ class RealtimeMonitorService:
             if item.get("image_account_switched") is True
             and str(item.get("status") or "").lower() == "success"
         )
+        account_switch_unrecovered = max(0, account_switch_requests - account_switch_success)
+        account_switch_average = (
+            round(account_switches / account_switch_requests, 1)
+            if account_switch_requests else 0
+        )
         durations = [_int_ms(item.get("duration_ms")) for item in completed if _int_ms(item.get("duration_ms"))]
         metric_p95 = {key: self._percentile(self._metric_values(completed, key), 95) for key in METRIC_LABELS}
         models = Counter(str(item.get("model") or "unknown") for item in completed if item.get("model"))
@@ -749,6 +771,8 @@ class RealtimeMonitorService:
             "account_switch_requests": account_switch_requests,
             "account_switches": account_switches,
             "account_switch_success": account_switch_success,
+            "account_switch_unrecovered": account_switch_unrecovered,
+            "account_switch_average": account_switch_average,
             "account_switch_recovery_rate": (
                 round(account_switch_success * 100 / account_switch_requests, 1)
                 if account_switch_requests else 0
@@ -768,8 +792,10 @@ class RealtimeMonitorService:
                 "local_reject_or_busy": sum(1 for item in completed if self._is_local_reject_or_busy(item)),
             },
             "by_model": dict(models.most_common(10)),
+            "window_model_count": len(models),
             "active_by_model": dict(active_models.most_common(10)),
             "active_by_egress": dict(active_egress.most_common(8)),
+            "active_egress_count": len(active_egress),
             "active_by_stage": dict(active_stages.most_common(10)),
         }
 

@@ -8,8 +8,8 @@
 
 auth-key: chatgpt2api
 refresh_account_interval_minute: 5
-image_retention_days: 15
-log_retention_days: 30
+image_retention_hours: 360
+log_retention_hours: 720
 image_poll_timeout_secs: 60
 image_stream_timeout_secs: 80
 image_poll_interval_secs: 10
@@ -123,7 +123,6 @@ basic:
   api_key: ""
   base_url: ""
   proxy: ""
-  image_expire_hours: 15
 
 image_generation:
   enabled: true

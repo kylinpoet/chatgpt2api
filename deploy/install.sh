@@ -546,7 +546,8 @@ write_default_config_json() {
 {
   "auth-key": "$(json_escape "${AUTH_KEY}")",
   "refresh_account_interval_minute": 5,
-  "image_retention_days": 15,
+  "image_retention_hours": 360,
+  "log_retention_hours": 720,
   "image_poll_timeout_secs": 60,
   "image_stream_timeout_secs": 80,
   "auto_remove_rate_limited_accounts": false,

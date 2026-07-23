@@ -852,6 +852,90 @@ def _proxy_node_image_concurrency_limit(node: Mapping[str, object]) -> int:
     return DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT
 
 
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (OverflowError, TypeError, ValueError):
+        return 0
+
+
+def normalize_proxy_profile_payload(profile: Mapping[str, object]) -> dict[str, object]:
+    """Return the canonical proxy profile exposed to control-panel callers."""
+    profile_id = _clean(profile.get("id"))
+    return {
+        "id": profile_id,
+        "name": _clean(profile.get("name")) or profile_id,
+        "proxy": _clean(profile.get("proxy")),
+        "enabled": profile.get("enabled") is not False,
+        "notes": _clean(profile.get("notes")),
+    }
+
+
+def normalize_proxy_profiles_payload(profiles: object) -> list[dict[str, object]]:
+    if not isinstance(profiles, list):
+        return []
+    return [
+        normalized
+        for item in profiles
+        if isinstance(item, Mapping)
+        and (normalized := normalize_proxy_profile_payload(item)).get("id")
+    ]
+
+
+def normalize_proxy_group_payload(group: Mapping[str, object]) -> dict[str, object]:
+    """Return the canonical random-selection proxy group contract.
+
+    Proxy group selection currently chooses a random node with available image
+    capacity. Historical strategy/rotation fields were never consumed by the
+    runtime, so they are intentionally not part of this contract.
+    """
+    group_id = _clean(group.get("id"))
+    raw_nodes = group.get("nodes")
+    nodes: list[dict[str, object]] = []
+    if isinstance(raw_nodes, list):
+        for index, raw_node in enumerate(raw_nodes):
+            if not isinstance(raw_node, Mapping):
+                continue
+            node_id = _proxy_node_id(raw_node, index)
+            nodes.append(
+                {
+                    "id": node_id,
+                    "name": _clean(raw_node.get("name")) or node_id,
+                    "url": _clean(raw_node.get("url")),
+                    "enabled": raw_node.get("enabled") is not False,
+                    "image_concurrency_limit": min(
+                        10000,
+                        _proxy_node_image_concurrency_limit(raw_node),
+                    ),
+                    "last_latency_ms": _nonnegative_int(raw_node.get("last_latency_ms")),
+                    "fail_count": _nonnegative_int(raw_node.get("fail_count")),
+                    "last_error": _clean(raw_node.get("last_error")),
+                    "last_checked_at": _clean(raw_node.get("last_checked_at")),
+                    "last_error_at": _clean(raw_node.get("last_error_at")),
+                    "cooldown_until": _clean(raw_node.get("cooldown_until")),
+                    "notes": _clean(raw_node.get("notes")),
+                }
+            )
+    return {
+        "id": group_id,
+        "name": _clean(group.get("name")) or group_id,
+        "enabled": group.get("enabled") is not False,
+        "notes": _clean(group.get("notes")),
+        "nodes": nodes,
+    }
+
+
+def normalize_proxy_groups_payload(groups: object) -> list[dict[str, object]]:
+    if not isinstance(groups, list):
+        return []
+    return [
+        normalized
+        for item in groups
+        if isinstance(item, Mapping)
+        and (normalized := normalize_proxy_group_payload(item)).get("id")
+    ]
+
+
 def _proxy_group_selection(group_id: str, node: Mapping[str, object], index: int) -> ProxyGroupSelection:
     node_id = _proxy_node_id(node, index)
     return ProxyGroupSelection(

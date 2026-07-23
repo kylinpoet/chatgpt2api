@@ -255,7 +255,8 @@ environment:
 | `image_remove_conversation_after_result` | `false` | 图片成功保存后尝试隐藏上游 ChatGPT 官网会话。 |
 | `auto_remove_invalid_accounts` | `true` | 鉴权失效账号是否自动移除。 |
 | `auto_remove_rate_limited_accounts` | `false` | 远程确认图片额度耗尽后是否自动移除账号。 |
-| `log_retention_days` | `30` | 调用日志自动清理天数。 |
+| `image_retention_hours` | `360` | 图片自动清理保留小时数。 |
+| `log_retention_hours` | `720` | 调用日志自动清理保留小时数。 |
 | `proxy_runtime` | 关闭 | 稳定代理运行时和 Cloudflare clearance 配置。 |
 
 ### 状态说明

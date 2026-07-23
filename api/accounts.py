@@ -27,6 +27,7 @@ from services.account_service import account_service
 from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
+from services.proxy_service import normalize_proxy_groups_payload
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
@@ -244,7 +245,7 @@ def _account_group_payload(groups: list[dict[str, Any]] | None = None) -> dict[s
         )
     return {
         "groups": normalized_groups,
-        "proxy_groups": _config_dict_list("proxy_groups"),
+        "proxy_groups": normalize_proxy_groups_payload(_config_dict_list("proxy_groups")),
     }
 
 
@@ -295,16 +296,129 @@ def _account_status_label(
 def _account_status_payload(account: dict[str, Any]) -> dict[str, str]:
     category = _account_status_category(account)
     return {
+        "backend_status": _clean_text(account.get("status")) or _account_status_label(category),
         "status_category": category,
         "status_label": _account_status_label(category),
+    }
+
+
+_ACCOUNT_PLAN_LABELS = {
+    "free": "Free",
+    "plus": "Plus",
+    "pro": "Pro",
+    "prolite": "ProLite",
+    "team": "Team",
+    "business": "Team",
+    "enterprise": "Enterprise",
+}
+
+
+def _account_source_payload(account: dict[str, Any]) -> dict[str, str]:
+    raw = _clean_text(account.get("source_type")).lower()
+    source_type = "codex" if raw in {"codex", "cpa", "cpa_json", "remote_cpa", "sub2api"} else "web"
+    return {
+        "source_type": source_type,
+        "source_label": "Codex" if source_type == "codex" else "Web",
+    }
+
+
+def _account_plan_payload(account: dict[str, Any]) -> dict[str, str]:
+    raw = _clean_text(account.get("type") or account.get("plan_type"))
+    key = raw.lower().replace("-", "").replace("_", "").replace(" ", "")
+    label = _ACCOUNT_PLAN_LABELS.get(key) or raw or "未知"
+    return {
+        "plan_type": raw,
+        "plan_label": label,
+    }
+
+
+def _account_availability_payload(account: dict[str, Any]) -> dict[str, Any]:
+    category = _account_status_category(account)
+    remote_result = _clean_text(account.get("last_remote_check_result")).lower()
+    last_error = _clean_text(
+        account.get("last_remote_check_error")
+        or account.get("last_refresh_error")
+        or account.get("last_token_refresh_error")
+    )
+    if category == "disabled":
+        availability = "disabled"
+        reason = "账号已禁用"
+        reason_code = "disabled"
+        error_kind = ""
+    elif category == "abnormal":
+        availability = "invalid"
+        reason = "远程确认账号登录态已失效"
+        reason_code = "account_invalid"
+        error_kind = "auth_invalid"
+    elif category == "limited":
+        availability = "cooling"
+        reason = "远程确认图片额度已用完"
+        reason_code = "image_quota_exhausted"
+        error_kind = "quota_exhausted"
+    else:
+        availability = "ready"
+        if remote_result == "pending":
+            reason = "正在核验账号状态，完成后会自动恢复或按设置移除。"
+            reason_code = ""
+            error_kind = ""
+        elif remote_result == "error" or last_error:
+            reason = "最近一次账号检测失败，尚未确认账号失效。"
+            reason_code = "upstream_error"
+            error_kind = "upstream_error"
+        else:
+            reason = ""
+            reason_code = ""
+            error_kind = ""
+    return {
+        "availability": availability,
+        "enabled": category != "disabled",
+        "status_reason": reason,
+        "status_reason_code": reason_code,
+        "last_error": last_error,
+        "last_error_kind": error_kind,
+    }
+
+
+def _account_image_quota_payload(account: dict[str, Any]) -> dict[str, Any]:
+    try:
+        remaining = max(0, int(float(account.get("quota") or 0)))
+    except (OverflowError, TypeError, ValueError):
+        remaining = 0
+    known = account.get("image_quota_unknown") is False
+    return {
+        "known": known,
+        "remaining": remaining if known else None,
+        "limited": _account_status_category(account) == "limited",
+        "restore_at": account.get("restore_at") or None,
     }
 
 
 def _account_for_api(account: dict[str, Any]) -> dict[str, Any]:
     return {
         **account,
+        **_account_source_payload(account),
+        **_account_plan_payload(account),
         **_account_status_payload(account),
+        **_account_availability_payload(account),
+        "image_quota": _account_image_quota_payload(account),
+        "success_count": int(account.get("success") or 0),
+        "failure_count": int(account.get("fail") or 0),
     }
+
+
+def _accounts_for_api(items: object) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    return [_account_for_api(item) for item in items if isinstance(item, dict)]
+
+
+def _account_result_for_api(result: object) -> dict[str, Any]:
+    payload = dict(result) if isinstance(result, dict) else {}
+    if "item" in payload and isinstance(payload.get("item"), dict):
+        payload["item"] = _account_for_api(payload["item"])
+    if "items" in payload:
+        payload["items"] = _accounts_for_api(payload.get("items"))
+    return payload
 
 
 def _status_matches_filter(account: dict[str, Any], status_filter: str) -> bool:
@@ -510,7 +624,7 @@ def create_router() -> APIRouter:
         return {
             "deleted": normalized,
             **_account_group_payload(updated.get("account_groups", [])),
-            "items": account_service.list_accounts(),
+            "items": _accounts_for_api(account_service.list_accounts()),
         }
 
     @router.post("/api/accounts")
@@ -532,19 +646,19 @@ def create_router() -> APIRouter:
         else:
             result = account_service.add_accounts(tokens, return_items=body.return_items)
         if not body.refresh:
-            return {
+            return _account_result_for_api({
                 **result,
                 "refreshed": 0,
                 "errors": [],
                 "items": result.get("items", []) if body.return_items else [],
-            }
+            })
         refresh_result = account_service.refresh_accounts(tokens)
-        return {
+        return _account_result_for_api({
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", result.get("items", [])) if body.return_items else [],
-        }
+        })
 
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
@@ -600,7 +714,10 @@ def create_router() -> APIRouter:
         progress = account_service.get_refresh_progress(progress_id)
         if progress is None:
             raise HTTPException(status_code=404, detail={"error": "progress not found"})
-        return progress
+        payload = dict(progress)
+        if isinstance(payload.get("result"), dict):
+            payload["result"] = _account_result_for_api(payload["result"])
+        return payload
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
@@ -653,9 +770,16 @@ def create_router() -> APIRouter:
         account = account_service.update_account(access_token, updates)
         if account is None:
             if existed and account_service.get_account(access_token) is None:
-                return {"item": None, "removed": 1, "items": account_service.list_accounts()}
+                return {
+                    "item": None,
+                    "removed": 1,
+                    "items": _accounts_for_api(account_service.list_accounts()),
+                }
             raise HTTPException(status_code=404, detail={"error": "account not found"})
-        return {"item": account, "items": account_service.list_accounts()}
+        return {
+            "item": _account_for_api(account),
+            "items": _accounts_for_api(account_service.list_accounts()),
+        }
 
     @router.post("/api/accounts/batch-update")
     async def batch_update_accounts(body: AccountBatchUpdateRequest, authorization: str | None = Header(default=None)):
@@ -684,7 +808,7 @@ def create_router() -> APIRouter:
             "updated": updated,
             "removed": removed,
             "errors": errors,
-            "items": account_service.list_accounts(),
+            "items": _accounts_for_api(account_service.list_accounts()),
         }
 
     @router.post("/api/accounts/group")
@@ -709,7 +833,7 @@ def create_router() -> APIRouter:
             "errors": errors,
             "group_id": group_id,
             **_account_group_payload(),
-            "items": account_service.list_accounts(),
+            "items": _accounts_for_api(account_service.list_accounts()),
         }
 
     @router.post("/api/accounts/oauth/start")
@@ -754,12 +878,12 @@ def create_router() -> APIRouter:
         refresh_result = await run_in_threadpool(
             account_service.refresh_accounts, [tokens["access_token"]]
         )
-        return {
+        return _account_result_for_api({
             **add_result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", add_result.get("items", [])),
-        }
+        })
 
     @router.get("/api/cpa/pools")
     async def list_cpa_pools(authorization: str | None = Header(default=None)):

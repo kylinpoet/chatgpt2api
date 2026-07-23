@@ -6,8 +6,10 @@ import io
 import json
 import os
 import random
+import sqlite3
 import subprocess
 import tarfile
+import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,8 +18,8 @@ from urllib.parse import quote, urlencode
 from curl_cffi import requests
 
 from services.config import BASE_DIR, CONFIG_FILE, DATA_DIR, config, load_backup_state, save_backup_state
-from services.image_storage_service import IMAGE_INDEX_FILE
-from services.image_tags_service import TAGS_FILE
+from services.image_catalog_service import IMAGE_CATALOG_FILE
+from services.log_store_service import SYSTEM_LOGS_FILE
 
 
 def _utc_now() -> datetime:
@@ -629,12 +631,14 @@ class BackupService:
             if include.get("sub2api"):
                 self._add_file_to_archive(archive, DATA_DIR / "sub2api_config.json", "data/sub2api_config.json")
             if include.get("logs"):
-                self._add_file_to_archive(archive, DATA_DIR / "logs.jsonl", "data/logs.jsonl")
+                from services.log_service import log_service
+
+                log_service.flush()
+                self._add_sqlite_to_archive(archive, SYSTEM_LOGS_FILE, "data/system_logs.db")
             if include.get("dashboard_metrics"):
                 self._add_file_to_archive(archive, DATA_DIR / "dashboard_metrics.json", "data/dashboard_metrics.json")
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
-                self._add_file_to_archive(archive, IMAGE_INDEX_FILE, "data/image_index.json")
             if include.get("accounts_snapshot"):
                 self._add_bytes_to_archive(
                     archive,
@@ -648,7 +652,7 @@ class BackupService:
                     _json_bytes(config.get_storage_backend().load_auth_keys()),
                 )
             if include.get("images"):
-                self._add_file_to_archive(archive, TAGS_FILE, "data/image_tags.json")
+                self._add_sqlite_to_archive(archive, IMAGE_CATALOG_FILE, "data/image_catalog.db")
                 self._add_directory_to_archive(archive, config.images_dir, "data/images")
         return buffer.getvalue()
 
@@ -662,6 +666,20 @@ class BackupService:
         if not source.exists() or not source.is_file():
             return
         archive.add(source, arcname=arcname)
+
+    def _add_sqlite_to_archive(self, archive: tarfile.TarFile, source: Path, arcname: str) -> None:
+        if not source.exists() or not source.is_file():
+            return
+        with tempfile.TemporaryDirectory(prefix="chatgpt2api-backup-") as temp_dir:
+            snapshot = Path(temp_dir) / source.name
+            source_connection = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+            target_connection = sqlite3.connect(snapshot)
+            try:
+                source_connection.backup(target_connection)
+            finally:
+                target_connection.close()
+                source_connection.close()
+            archive.add(snapshot, arcname=arcname)
 
     def _add_directory_to_archive(self, archive: tarfile.TarFile, source_dir: Path, arcname_root: str) -> None:
         if not source_dir.exists() or not source_dir.is_dir():
