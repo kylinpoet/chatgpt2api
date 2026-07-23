@@ -635,8 +635,6 @@ class BackupService:
 
                 log_service.flush()
                 self._add_sqlite_to_archive(archive, SYSTEM_LOGS_FILE, "data/system_logs.db")
-            if include.get("dashboard_metrics"):
-                self._add_file_to_archive(archive, DATA_DIR / "dashboard_metrics.json", "data/dashboard_metrics.json")
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
             if include.get("accounts_snapshot"):

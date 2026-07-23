@@ -108,7 +108,6 @@ backup:
     cpa: true
     sub2api: true
     logs: true
-    dashboard_metrics: true
     image_tasks: true
     accounts_snapshot: true
     auth_keys_snapshot: true

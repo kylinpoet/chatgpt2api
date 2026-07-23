@@ -26,7 +26,6 @@ export type SettingsBackupIncludeKey =
   | 'cpa'
   | 'sub2api'
   | 'logs'
-  | 'dashboard_metrics'
   | 'image_tasks'
   | 'accounts_snapshot'
   | 'auth_keys_snapshot'
@@ -76,8 +75,7 @@ export const backupIncludeOptions: SettingsBackupIncludeOption[] = [
   { value: 'register', label: '注册配置' },
   { value: 'cpa', label: 'CPA 配置' },
   { value: 'sub2api', label: 'Sub2API 配置' },
-  { value: 'logs', label: '调度与调用日志' },
-  { value: 'dashboard_metrics', label: '概览统计' },
+  { value: 'logs', label: '调用日志与概览统计' },
   { value: 'image_tasks', label: '图片任务记录' },
   { value: 'accounts_snapshot', label: '账号快照' },
   { value: 'auth_keys_snapshot', label: '用户密钥快照' },

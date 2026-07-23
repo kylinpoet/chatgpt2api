@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,8 @@ from services.sqlite_runtime import SQLiteDatabase
 
 
 SYSTEM_LOGS_FILE = DATA_DIR / "system_logs.db"
+DASHBOARD_BUCKET_MS = 60 * 60 * 1000
+DASHBOARD_RETENTION_DAYS = 30
 
 LOG_STORE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS logs (
@@ -49,6 +53,35 @@ CREATE INDEX IF NOT EXISTS idx_logs_account_created ON logs(account, created_at_
 CREATE INDEX IF NOT EXISTS idx_logs_conversation_created ON logs(conversation_id, created_at_ms DESC, seq DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_failed_created ON logs(is_failed, created_at_ms DESC, seq DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_limited_created ON logs(is_limited, created_at_ms DESC, seq DESC);
+
+CREATE TABLE IF NOT EXISTS dashboard_results_hourly (
+    bucket_ms INTEGER PRIMARY KEY,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    text_count INTEGER NOT NULL DEFAULT 0,
+    success_duration_ms INTEGER NOT NULL DEFAULT 0,
+    success_duration_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS dashboard_performance_hourly (
+    bucket_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    text_count INTEGER NOT NULL DEFAULT 0,
+    success_duration_ms INTEGER NOT NULL DEFAULT 0,
+    success_duration_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_ms, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_dashboard_performance_kind_bucket
+ON dashboard_performance_hourly(kind, bucket_ms);
+
+CREATE TABLE IF NOT EXISTS dashboard_switches_hourly (
+    bucket_ms INTEGER PRIMARY KEY,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    switch_count INTEGER NOT NULL DEFAULT 0,
+    recovered_count INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS log_counters (
     key TEXT PRIMARY KEY,
@@ -120,6 +153,178 @@ class LogStore:
         values = [tuple(record.get(column) for column in LOG_INSERT_COLUMNS) for record in records]
         with self.database.write() as connection:
             connection.executemany(sql, values)
+            self._record_dashboard_metrics(connection, records)
+
+    @staticmethod
+    def _dashboard_result(record: dict[str, Any]) -> str:
+        if str(record.get("type") or "") != "call":
+            return ""
+        if bool(record.get("is_text_review")):
+            return "text"
+        if (
+            str(record.get("status") or "").lower() == "success"
+            and not bool(record.get("is_failed"))
+        ):
+            return "success"
+        if bool(record.get("is_failed")) or bool(record.get("is_limited")):
+            return "failed"
+        return ""
+
+    @classmethod
+    def _record_dashboard_metrics(cls, connection, records: list[dict[str, Any]]) -> None:
+        results: dict[int, dict[str, int]] = {}
+        dimensions: dict[tuple[int, str, str], dict[str, int]] = {}
+        switches: dict[int, dict[str, int]] = {}
+
+        def increment_dimension(
+            bucket_ms: int,
+            kind: str,
+            value: object,
+            *,
+            result: str,
+            duration_ms: int = 0,
+        ) -> None:
+            label = _clean(value)[:200]
+            if not label:
+                return
+            current = dimensions.setdefault(
+                (bucket_ms, kind, label),
+                {
+                    "success": 0,
+                    "failed": 0,
+                    "text": 0,
+                    "duration": 0,
+                    "duration_count": 0,
+                },
+            )
+            current[result] += 1
+            if result == "success":
+                current["duration"] += max(0, int(duration_ms))
+                current["duration_count"] += 1
+
+        for record in records:
+            result = cls._dashboard_result(record)
+            if not result:
+                continue
+            created_at_ms = max(0, int(record.get("created_at_ms") or 0))
+            bucket_ms = created_at_ms - (created_at_ms % DASHBOARD_BUCKET_MS)
+            bucket = results.setdefault(
+                bucket_ms,
+                {"success": 0, "failed": 0, "text": 0, "duration": 0, "duration_count": 0},
+            )
+            bucket[result] += 1
+
+            duration_ms = 0
+            if result == "success":
+                duration_ms = max(0, int(record.get("duration_ms") or 0))
+                bucket["duration"] += duration_ms
+                bucket["duration_count"] += 1
+
+            switch_count = max(0, int(record.get("switch_count") or 0))
+            if result in {"success", "failed"} and switch_count > 0:
+                switch_bucket = switches.setdefault(
+                    bucket_ms,
+                    {"requests": 0, "switches": 0, "recovered": 0},
+                )
+                switch_bucket["requests"] += 1
+                switch_bucket["switches"] += switch_count
+                if result == "success":
+                    switch_bucket["recovered"] += 1
+
+            increment_dimension(
+                bucket_ms,
+                "model",
+                record.get("model"),
+                result=result,
+                duration_ms=duration_ms if result == "success" else 0,
+            )
+            increment_dimension(
+                bucket_ms,
+                "endpoint",
+                record.get("endpoint"),
+                result=result,
+                duration_ms=duration_ms if result == "success" else 0,
+            )
+
+        if results:
+            connection.executemany(
+                """
+                INSERT INTO dashboard_results_hourly (
+                    bucket_ms, success_count, failed_count, text_count,
+                    success_duration_ms, success_duration_count
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bucket_ms) DO UPDATE SET
+                    success_count = success_count + excluded.success_count,
+                    failed_count = failed_count + excluded.failed_count,
+                    text_count = text_count + excluded.text_count,
+                    success_duration_ms = success_duration_ms + excluded.success_duration_ms,
+                    success_duration_count = success_duration_count + excluded.success_duration_count
+                """,
+                [
+                    (
+                        bucket_ms,
+                        values["success"],
+                        values["failed"],
+                        values["text"],
+                        values["duration"],
+                        values["duration_count"],
+                    )
+                    for bucket_ms, values in results.items()
+                ],
+            )
+        if dimensions:
+            connection.executemany(
+                """
+                INSERT INTO dashboard_performance_hourly (
+                    bucket_ms, kind, value, success_count, failed_count,
+                    text_count, success_duration_ms, success_duration_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bucket_ms, kind, value) DO UPDATE SET
+                    success_count = success_count + excluded.success_count,
+                    failed_count = failed_count + excluded.failed_count,
+                    text_count = text_count + excluded.text_count,
+                    success_duration_ms = success_duration_ms + excluded.success_duration_ms,
+                    success_duration_count = success_duration_count + excluded.success_duration_count
+                """,
+                [
+                    (
+                        *key,
+                        values["success"],
+                        values["failed"],
+                        values["text"],
+                        values["duration"],
+                        values["duration_count"],
+                    )
+                    for key, values in dimensions.items()
+                ],
+            )
+        if switches:
+            connection.executemany(
+                """
+                INSERT INTO dashboard_switches_hourly (
+                    bucket_ms, request_count, switch_count, recovered_count
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(bucket_ms) DO UPDATE SET
+                    request_count = request_count + excluded.request_count,
+                    switch_count = switch_count + excluded.switch_count,
+                    recovered_count = recovered_count + excluded.recovered_count
+                """,
+                [
+                    (
+                        bucket_ms,
+                        values["requests"],
+                        values["switches"],
+                        values["recovered"],
+                    )
+                    for bucket_ms, values in switches.items()
+                ],
+            )
+
+        cutoff_ms = int(time.time() * 1000) - (DASHBOARD_RETENTION_DAYS + 1) * 24 * DASHBOARD_BUCKET_MS
+        cutoff_bucket = cutoff_ms - (cutoff_ms % DASHBOARD_BUCKET_MS)
+        connection.execute("DELETE FROM dashboard_results_hourly WHERE bucket_ms < ?", (cutoff_bucket,))
+        connection.execute("DELETE FROM dashboard_performance_hourly WHERE bucket_ms < ?", (cutoff_bucket,))
+        connection.execute("DELETE FROM dashboard_switches_hourly WHERE bucket_ms < ?", (cutoff_bucket,))
 
     @staticmethod
     def _summary_item(row: Any) -> dict[str, Any]:
@@ -310,6 +515,237 @@ class LogStore:
             if isinstance(value, dict):
                 items.append(value)
         return items
+
+    def dashboard_summary(self, time_range: str = "24h", *, now_ms: int | None = None) -> dict[str, Any]:
+        safe_range = time_range if time_range in {"24h", "7d", "30d"} else "24h"
+        bucket_count = {"24h": 24, "7d": 7, "30d": 30}[safe_range]
+        beijing_tz = timezone(timedelta(hours=8))
+        current = datetime.fromtimestamp((now_ms or int(time.time() * 1000)) / 1000, tz=beijing_tz)
+        current_hour = current.replace(minute=0, second=0, microsecond=0)
+        if safe_range == "24h":
+            starts = [current_hour - timedelta(hours=bucket_count - 1 - index) for index in range(bucket_count)]
+            labels = [start.strftime("%H:00") for start in starts]
+        else:
+            current_day = current_hour.replace(hour=0)
+            starts = [current_day - timedelta(days=bucket_count - 1 - index) for index in range(bucket_count)]
+            labels = [start.strftime("%m-%d") for start in starts]
+        start_ms = int(starts[0].timestamp() * 1000)
+        end_ms = int((current_hour + timedelta(hours=1)).timestamp() * 1000) - 1
+
+        def bucket_index(bucket_ms: int) -> int | None:
+            bucket = datetime.fromtimestamp(bucket_ms / 1000, tz=beijing_tz)
+            if safe_range == "24h":
+                index = int((bucket - starts[0]).total_seconds() // 3600)
+            else:
+                index = (bucket.date() - starts[0].date()).days
+            return index if 0 <= index < bucket_count else None
+
+        success = [0] * bucket_count
+        failed = [0] * bucket_count
+        text = [0] * bucket_count
+        switch_requests = [0] * bucket_count
+        switch_counts = [0] * bucket_count
+        switch_recovered = [0] * bucket_count
+        duration_sums = [0] * bucket_count
+        duration_counts = [0] * bucket_count
+        dimensions: dict[str, dict[str, dict[str, int]]] = {"model": {}, "endpoint": {}}
+        model_call_trend: dict[str, list[int]] = {}
+        model_duration_sums: dict[str, list[int]] = {}
+        model_duration_counts: dict[str, list[int]] = {}
+
+        with self.database.read() as connection:
+            result_rows = connection.execute(
+                """
+                SELECT bucket_ms, success_count, failed_count, text_count,
+                       success_duration_ms, success_duration_count
+                FROM dashboard_results_hourly
+                WHERE bucket_ms BETWEEN ? AND ?
+                ORDER BY bucket_ms
+                """,
+                (start_ms, end_ms),
+            ).fetchall()
+            dimension_rows = connection.execute(
+                """
+                SELECT kind, value, SUM(success_count) AS success_count,
+                       SUM(failed_count) AS failed_count,
+                       SUM(text_count) AS text_count,
+                       SUM(success_duration_ms) AS success_duration_ms,
+                       SUM(success_duration_count) AS success_duration_count
+                FROM dashboard_performance_hourly
+                WHERE bucket_ms BETWEEN ? AND ?
+                GROUP BY kind, value
+                """,
+                (start_ms, end_ms),
+            ).fetchall()
+            switch_rows = connection.execute(
+                """
+                SELECT bucket_ms, request_count, switch_count, recovered_count
+                FROM dashboard_switches_hourly
+                WHERE bucket_ms BETWEEN ? AND ?
+                ORDER BY bucket_ms
+                """,
+                (start_ms, end_ms),
+            ).fetchall()
+            model_trend_rows = connection.execute(
+                """
+                SELECT bucket_ms, value, success_count, failed_count, text_count,
+                       success_duration_ms, success_duration_count
+                FROM dashboard_performance_hourly
+                WHERE kind = 'model' AND bucket_ms BETWEEN ? AND ?
+                ORDER BY bucket_ms, value
+                """,
+                (start_ms, end_ms),
+            ).fetchall()
+
+        for row in result_rows:
+            index = bucket_index(int(row["bucket_ms"]))
+            if index is None:
+                continue
+            success[index] += int(row["success_count"] or 0)
+            failed[index] += int(row["failed_count"] or 0)
+            text[index] += int(row["text_count"] or 0)
+            duration_sums[index] += int(row["success_duration_ms"] or 0)
+            duration_counts[index] += int(row["success_duration_count"] or 0)
+
+        for row in dimension_rows:
+            kind = str(row["kind"] or "")
+            value = str(row["value"] or "")
+            if kind not in dimensions or not value:
+                continue
+            dimensions[kind][value] = {
+                "success": int(row["success_count"] or 0),
+                "failed": int(row["failed_count"] or 0),
+                "text": int(row["text_count"] or 0),
+                "duration": int(row["success_duration_ms"] or 0),
+                "duration_count": int(row["success_duration_count"] or 0),
+            }
+
+        for row in switch_rows:
+            index = bucket_index(int(row["bucket_ms"]))
+            if index is None:
+                continue
+            switch_requests[index] += int(row["request_count"] or 0)
+            switch_counts[index] += int(row["switch_count"] or 0)
+            switch_recovered[index] += int(row["recovered_count"] or 0)
+
+        for row in model_trend_rows:
+            index = bucket_index(int(row["bucket_ms"]))
+            model = str(row["value"] or "").strip()
+            if index is None or not model:
+                continue
+            values = model_call_trend.setdefault(model, [0] * bucket_count)
+            values[index] += (
+                int(row["success_count"] or 0)
+                + int(row["failed_count"] or 0)
+                + int(row["text_count"] or 0)
+            )
+            duration_values = model_duration_sums.setdefault(model, [0] * bucket_count)
+            duration_value_counts = model_duration_counts.setdefault(model, [0] * bucket_count)
+            duration_values[index] += int(row["success_duration_ms"] or 0)
+            duration_value_counts[index] += int(row["success_duration_count"] or 0)
+
+        success_count = sum(success)
+        failed_count = sum(failed)
+        text_count = sum(text)
+        measured_count = success_count + failed_count
+        switch_request_count = sum(switch_requests)
+        switch_count = sum(switch_counts)
+        switch_recovered_count = sum(switch_recovered)
+        success_duration_count = sum(duration_counts)
+        average_duration_ms = round(sum(duration_sums) / success_duration_count) if success_duration_count else 0
+
+        def performance_rows(kind: str) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            dimension_success_total = sum(values["success"] for values in dimensions[kind].values())
+            for name, values in dimensions[kind].items():
+                successful_calls = values["success"]
+                measured = successful_calls + values["failed"]
+                if measured <= 0:
+                    continue
+                rows.append(
+                    {
+                        "name": name,
+                        "successful_calls": successful_calls,
+                        "success_share": (
+                            round(successful_calls * 100 / dimension_success_total, 1)
+                            if dimension_success_total
+                            else 0
+                        ),
+                        "success_rate": round(successful_calls * 100 / measured, 1) if measured else 0,
+                        "average_success_duration_ms": (
+                            round(values["duration"] / values["duration_count"])
+                            if values["duration_count"]
+                            else 0
+                        ),
+                    }
+                )
+            return sorted(rows, key=lambda item: (-item["successful_calls"], item["name"]))
+
+        return {
+            "updated_at": current.isoformat(timespec="seconds"),
+            "successful_calls": success_count,
+            "failed_calls": failed_count,
+            "text_calls": text_count,
+            "success_rate": round(success_count * 100 / measured_count, 1) if measured_count else 0,
+            "account_switch_requests": switch_request_count,
+            "account_switches": switch_count,
+            "account_switch_recovered": switch_recovered_count,
+            "account_switch_recovery_rate": (
+                round(switch_recovered_count * 100 / switch_request_count, 1)
+                if switch_request_count
+                else 0
+            ),
+            "average_success_duration_ms": average_duration_ms,
+            "model_performance": performance_rows("model"),
+            "endpoint_performance": performance_rows("endpoint"),
+            "trend": {
+                "labels": labels,
+                "successful_calls": success,
+                "failed_calls": failed,
+                "text_calls": text,
+                "account_switch_requests": switch_requests,
+                "account_switches": switch_counts,
+                "account_switch_recovered": switch_recovered,
+                "model_calls": dict(
+                    sorted(
+                        model_call_trend.items(),
+                        key=lambda item: (-sum(item[1]), item[0]),
+                    )
+                ),
+                "model_average_success_duration_ms": {
+                    model: [
+                        round(values[index] / model_duration_counts[model][index])
+                        if model_duration_counts[model][index]
+                        else None
+                        for index in range(bucket_count)
+                    ]
+                    for model, values in sorted(
+                        model_duration_sums.items(),
+                        key=lambda item: (-sum(model_duration_counts[item[0]]), item[0]),
+                    )
+                },
+                "success_rate": [
+                    round(
+                        success[index] * 100
+                        / (success[index] + failed[index]),
+                        1,
+                    )
+                    if success[index] + failed[index]
+                    else 0
+                    for index in range(bucket_count)
+                ],
+                "account_switch_recovery_rate": [
+                    round(switch_recovered[index] * 100 / switch_requests[index], 1)
+                    if switch_requests[index]
+                    else 0
+                    for index in range(bucket_count)
+                ],
+                "average_success_duration_ms": [
+                    round(duration_sums[index] / duration_counts[index]) if duration_counts[index] else 0
+                    for index in range(bucket_count)
+                ],
+            },
+        }
 
     def delete(self, ids: list[str]) -> int:
         clean_ids = list(dict.fromkeys(_clean(id) for id in ids if _clean(id)))

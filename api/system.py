@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -25,11 +23,9 @@ from services.image_service import (
     list_images,
     storage_stats,
 )
-from services.image_failure import is_rate_limit_failure_code, is_structured_failure
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
-from services.dashboard_metrics_service import dashboard_metrics_service
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import log_service
 from services.model_catalog_service import get_model_catalog
 from services.proxy_service import (
     normalize_proxy_group_payload,
@@ -43,7 +39,6 @@ from services.proxy_service import (
 from services.realtime_monitor_service import realtime_monitor_service
 from services.retention_service import retention_service
 from services.runtime_log_service import list_runtime_logs
-from utils.timezone import beijing_now, parse_to_beijing_naive
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -131,45 +126,6 @@ def _coerce_proxy_node_image_concurrency_limit(value: object, *, default: int = 
     except (OverflowError, TypeError, ValueError):
         return default
     return max(0, min(limit, 10000))
-
-
-_NON_MODEL_KEYS = {
-    "",
-    "-",
-    "auto",
-    "default",
-    "unknown",
-    "null",
-    "none",
-    "low",
-    "medium",
-    "high",
-    "standard",
-    "hd",
-    "portrait",
-    "landscape",
-    "square",
-    "vertical",
-    "horizontal",
-    "image",
-    "images",
-    "text",
-    "chat",
-    "generation",
-    "generations",
-    "edit",
-    "edits",
-}
-
-
-def _looks_like_model_label(value: object) -> bool:
-    label = _clean_text(value)
-    key = label.lower()
-    if key in _NON_MODEL_KEYS or key.startswith("/"):
-        return False
-    if re.fullmatch(r"\d+\s*[x×]\s*\d+", key) or re.fullmatch(r"\d+\s*:\s*\d+", key):
-        return False
-    return bool(label)
 
 
 def _slug_id(value: object) -> str:
@@ -317,162 +273,6 @@ def _resolve_profile_proxy(profile_id: str) -> str:
         if profile.get("id") == normalized and profile.get("enabled", True):
             return _clean_text(profile.get("proxy"))
     return ""
-
-
-def _increment(counter: dict[str, int], key: object, default: str = "unknown") -> None:
-    label = _clean_text(key) or default
-    counter[label] = counter.get(label, 0) + 1
-
-
-def _detail_value(item: dict[str, Any], key: str, default: object = "") -> object:
-    detail = item.get("detail")
-    if isinstance(detail, dict):
-        value = detail.get(key)
-        if value not in (None, ""):
-            return value
-    value = item.get(key)
-    return default if value in (None, "") else value
-
-
-def _parse_log_time(value: object) -> datetime | None:
-    return parse_to_beijing_naive(value)
-
-
-def _beijing_now_naive() -> datetime:
-    return beijing_now().replace(tzinfo=None)
-
-
-def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> dict[str, Any]:
-    total = len(items)
-    success = 0
-    failed = 0
-    by_endpoint: dict[str, int] = {}
-    by_model: dict[str, int] = {}
-    by_status: dict[str, int] = {}
-    by_error_code: dict[str, int] = {}
-    recent_failures: list[dict[str, Any]] = []
-
-    bucket_count = {"24h": 24, "7d": 7, "30d": 30}.get(time_range, 24)
-    bucket_delta = timedelta(hours=1) if time_range == "24h" else timedelta(days=1)
-    bucket_format = "%H:00" if time_range == "24h" else "%m-%d"
-    raw_now = _beijing_now_naive()
-    current_bucket_start = (
-        raw_now.replace(minute=0, second=0, microsecond=0)
-        if time_range == "24h"
-        else raw_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-    starts = [current_bucket_start - bucket_delta * (bucket_count - 1 - index) for index in range(bucket_count)]
-    labels = [start.strftime(bucket_format) for start in starts]
-    total_requests = [0] * bucket_count
-    success_requests = [0] * bucket_count
-    failed_requests = [0] * bucket_count
-    rate_limited_requests = [0] * bucket_count
-    model_requests: dict[str, list[int]] = {}
-    model_total_times: dict[str, list[float]] = {}
-    model_time_counts: dict[str, list[int]] = {}
-
-    def bucket_index(dt: datetime | None) -> int | None:
-        if dt is None:
-            return None
-        if time_range == "24h":
-            bucket_start = dt.replace(minute=0, second=0, microsecond=0)
-            idx = int((bucket_start - starts[0]).total_seconds() // 3600)
-        else:
-            idx = (dt.date() - starts[0].date()).days
-        return idx if 0 <= idx < bucket_count else None
-
-    for item in items:
-        status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
-        endpoint = _clean_text(_detail_value(item, "endpoint"))
-        model = _clean_text(_detail_value(item, "model"))
-        error_code = _clean_text(
-            _detail_value(item, "error_code", _detail_value(item, "failure_code"))
-        ).lower()
-        dt = _parse_log_time(_detail_value(item, "started_at", item.get("time")))
-        idx = bucket_index(dt)
-
-        is_failed = is_structured_failure(
-            status=status,
-            error=_detail_value(item, "error"),
-            error_code=_detail_value(item, "error_code"),
-            failure_code=_detail_value(item, "failure_code"),
-        )
-        if is_failed:
-            failed += 1
-            if len(recent_failures) < 10:
-                recent_failures.append(
-                    {
-                        "id": item.get("id"),
-                        "time": item.get("time") or _detail_value(item, "started_at"),
-                        "summary": item.get("summary"),
-                        "endpoint": endpoint,
-                        "error_code": error_code,
-                        "stage": _detail_value(item, "stage"),
-                        "reason": _detail_value(item, "reason", _detail_value(item, "error")),
-                        "conversation_id": _detail_value(item, "conversation_id"),
-                    }
-                )
-        else:
-            success += 1
-
-        if status:
-            _increment(by_status, status)
-        if endpoint.startswith("/"):
-            _increment(by_endpoint, endpoint)
-        if _looks_like_model_label(model):
-            _increment(by_model, model)
-        if error_code:
-            _increment(by_error_code, error_code)
-
-        if idx is not None:
-            total_requests[idx] += 1
-            if is_failed:
-                if is_rate_limit_failure_code(error_code) or is_rate_limit_failure_code(status):
-                    rate_limited_requests[idx] += 1
-                else:
-                    failed_requests[idx] += 1
-            else:
-                success_requests[idx] += 1
-            if _looks_like_model_label(model):
-                model_requests.setdefault(model, [0] * bucket_count)[idx] += 1
-                duration_raw = _detail_value(item, "duration_ms", None)
-                try:
-                    duration_ms = max(0.0, float(duration_raw))
-                except (TypeError, ValueError):
-                    duration_ms = None
-                if duration_ms is not None:
-                    model_total_times.setdefault(model, [0.0] * bucket_count)[idx] += duration_ms
-                    model_time_counts.setdefault(model, [0] * bucket_count)[idx] += 1
-
-    model_avg_times = {
-        model: [
-            round(total / counts[index], 2) if counts[index] > 0 else 0.0
-            for index, total in enumerate(totals)
-        ]
-        for model, totals in model_total_times.items()
-        for counts in [model_time_counts.get(model, [0] * bucket_count)]
-    }
-
-    return {
-        "total": total,
-        "success": success,
-        "failed": failed,
-        "by_endpoint": by_endpoint,
-        "by_model": by_model,
-        "by_status": by_status,
-        "by_error_code": by_error_code,
-        "recent_failures": recent_failures,
-        "trend": {
-            "labels": labels,
-            "total_requests": total_requests,
-            "success_requests": success_requests,
-            "failed_requests": failed_requests,
-            "rate_limited_requests": rate_limited_requests,
-            "model_requests": model_requests,
-            "model_ttfb_times": {},
-            "model_total_times": model_avg_times,
-        },
-    }
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -865,36 +665,25 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/dashboard")
     async def get_dashboard(
         authorization: str | None = Header(default=None),
-        log_limit: int = Query(default=5000, ge=1, le=20000),
         time_range: str = Query(default="24h", pattern="^(24h|7d|30d)$"),
     ):
         require_admin(authorization)
-        from services.account_service import account_service as acct_svc
-
-        account_stats = acct_svc.get_stats()
+        account_stats = account_service.get_stats()
         account_healthy = bool(account_stats.get("active")) or bool(account_stats.get("unlimited_quota_count"))
-        storage = config.get_storage_backend()
-        call_logs = log_service.list(type=LOG_TYPE_CALL, limit=log_limit)
-        recent_log_summary = _dashboard_log_summary(call_logs, time_range=time_range)
-        await run_in_threadpool(dashboard_metrics_service.backfill_if_empty, call_logs)
-        dashboard_logs = await run_in_threadpool(dashboard_metrics_service.summary, time_range)
-        dashboard_logs["recent_failures"] = recent_log_summary.get("recent_failures", [])
-        image_storage_stats = await run_in_threadpool(storage_stats)
-        storage_health = await run_in_threadpool(storage.health_check)
+        dashboard_metrics = await run_in_threadpool(log_service.dashboard_summary, time_range)
+        updated_at = dashboard_metrics.pop("updated_at", "")
         return {
             "status": "ok" if account_healthy else "degraded",
             "healthy": account_healthy,
             "version": app_version,
+            "updated_at": updated_at,
+            "time_range": time_range,
+            "active_requests": realtime_monitor_service.active_count(),
             "accounts": {
                 **account_stats,
                 "healthy": account_healthy,
             },
-            "storage": {
-                "backend": storage.get_backend_info(),
-                "health": storage_health,
-                "images": image_storage_stats,
-            },
-            "logs": dashboard_logs,
+            "metrics": dashboard_metrics,
         }
 
     @router.post("/api/backup/test")

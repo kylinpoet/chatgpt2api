@@ -15,7 +15,6 @@ from api.support import resolve_web_asset, start_limited_account_watcher
 from services.account_service import account_service
 from services.backup_service import backup_service
 from services.config import config
-from services.dashboard_metrics_service import dashboard_metrics_service
 from services.log_service import log_service
 from services.retention_service import retention_service
 from services.realtime_monitor_service import realtime_monitor_service
@@ -66,10 +65,6 @@ def create_app() -> FastAPI:
             thread.join(timeout=1)
             cleanup_thread.join(timeout=1)
             log_service.close()
-            try:
-                dashboard_metrics_service.flush()
-            except Exception as exc:
-                logger.error({"event": "dashboard_metrics_shutdown_flush_failed", "error": str(exc)})
             backup_service.stop()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)

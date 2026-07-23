@@ -258,41 +258,19 @@ export interface AdminLogsResponse extends LogsResponse {
   stats: AdminLogStats
 }
 
-export interface AdminStatsTrend {
+export interface DashboardTrend {
   labels: string[]
-  total_requests: number[]
-  success_requests?: number[]
-  failed_requests: number[]
-  rate_limited_requests: number[]
-  model_requests?: Record<string, number[]>
-  model_ttfb_times?: Record<string, number[]>
-  model_total_times?: Record<string, number[]>
-}
-
-export interface AdminStats {
-  total_accounts: number
-  active_accounts: number
-  abnormal_accounts: number
-  disabled_accounts: number
-  failed_accounts: number
-  rate_limited_accounts: number
-  idle_accounts: number
-  total_quota: number
-  unlimited_quota_count?: number
-  unknown_quota_count?: number
-  success_count?: number
-  failed_count?: number
-  recent_failures?: Array<{
-    id?: string
-    time?: string
-    summary?: string
-    endpoint?: string
-    error_code?: string
-    stage?: string
-    reason?: string
-    conversation_id?: string
-  }>
-  trend: AdminStatsTrend
+  successful_calls: number[]
+  failed_calls: number[]
+  text_calls: number[]
+  account_switch_requests: number[]
+  account_switches: number[]
+  account_switch_recovered: number[]
+  model_calls: Record<string, number[]>
+  model_average_success_duration_ms: Record<string, Array<number | null>>
+  success_rate: number[]
+  account_switch_recovery_rate: number[]
+  average_success_duration_ms: number[]
 }
 
 export interface LoginRequest {
@@ -349,36 +327,36 @@ export interface DashboardAccountStats {
   healthy: boolean
 }
 
-export interface DashboardLogSummary {
-  total: number
-  success: number
-  failed: number
-  by_endpoint: Record<string, number>
-  by_model?: Record<string, number>
-  by_status: Record<string, number>
-  by_error_code: Record<string, number>
-  trend?: AdminStatsTrend
-  recent_failures: Array<{
-    id?: string
-    time?: string
-    summary?: string
-    endpoint?: string
-    error_code?: string
-    stage?: string
-    reason?: string
-    conversation_id?: string
-  }>
+export interface DashboardPerformanceRow {
+  name: string
+  successful_calls: number
+  success_share: number
+  success_rate: number
+  average_success_duration_ms: number
+}
+
+export interface DashboardMetrics {
+  successful_calls: number
+  failed_calls: number
+  text_calls: number
+  success_rate: number
+  account_switch_requests: number
+  account_switches: number
+  account_switch_recovered: number
+  account_switch_recovery_rate: number
+  average_success_duration_ms: number
+  model_performance: DashboardPerformanceRow[]
+  endpoint_performance: DashboardPerformanceRow[]
+  trend: DashboardTrend
 }
 
 export interface DashboardResponse {
   status: 'ok' | 'degraded'
   healthy: boolean
   version: string
+  updated_at: string
+  time_range: '24h' | '7d' | '30d'
+  active_requests: number
   accounts: DashboardAccountStats
-  storage: {
-    backend: Record<string, unknown>
-    health: Record<string, unknown>
-    images: Record<string, unknown>
-  }
-  logs: DashboardLogSummary
+  metrics: DashboardMetrics
 }

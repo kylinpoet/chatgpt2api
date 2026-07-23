@@ -269,10 +269,10 @@ class LogService:
             "detail": detail or data,
         }
         self._queue.put(self._store_record(item))
-        if type == LOG_TYPE_CALL:
-            from services.dashboard_metrics_service import safe_record_dashboard_call
 
-            safe_record_dashboard_call(item)
+    def dashboard_summary(self, time_range: str = "24h") -> dict[str, Any]:
+        self.flush()
+        return self.store.dashboard_summary(time_range)
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
         self.flush()

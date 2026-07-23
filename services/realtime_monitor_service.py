@@ -450,6 +450,10 @@ class RealtimeMonitorService:
             "metric_labels": METRIC_LABELS,
         }
 
+    def active_count(self) -> int:
+        with self._lock:
+            return len(self._active)
+
     def _merge_stage_data(self, record: dict[str, Any], data: dict[str, Any]) -> None:
         metrics = record.setdefault("metrics", {})
         metric_data = {key: value for key, value in data.items() if key.endswith("_ms")}

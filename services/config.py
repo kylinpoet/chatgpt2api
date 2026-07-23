@@ -22,7 +22,6 @@ DEFAULT_BACKUP_INCLUDE = {
     "cpa": True,
     "sub2api": True,
     "logs": True,
-    "dashboard_metrics": True,
     "image_tasks": True,
     "accounts_snapshot": True,
     "auth_keys_snapshot": True,

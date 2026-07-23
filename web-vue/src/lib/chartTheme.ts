@@ -315,7 +315,7 @@ export function getPieChartTheme(isMobile = false) {
  */
 export function createLineSeries(
   name: string,
-  data: number[],
+  data: Array<number | null>,
   color: string,
   options?: {
     smooth?: boolean
@@ -323,6 +323,8 @@ export function createLineSeries(
     areaOpacity?: number
     lineWidth?: number
     zIndex?: number
+    symbol?: 'circle' | 'diamond'
+    symbolSize?: number
     lineStyle?: {
       type?: 'solid' | 'dashed' | 'dotted'
       width?: number
@@ -335,6 +337,8 @@ export function createLineSeries(
     areaOpacity = 0.25,
     lineWidth = 2,
     zIndex = 1,
+    symbol,
+    symbolSize,
     lineStyle,
   } = options || {}
 
@@ -344,6 +348,8 @@ export function createLineSeries(
     data,
     smooth,
     showSymbol,
+    ...(symbol && { symbol }),
+    ...(symbolSize && { symbolSize }),
     lineStyle: {
       width: lineStyle?.width ?? lineWidth,
       ...(lineStyle?.type && { type: lineStyle.type }),
