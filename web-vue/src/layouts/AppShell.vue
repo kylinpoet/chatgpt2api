@@ -785,7 +785,7 @@ const navIconClassMap = computed<Record<string, string>>(() => {
 
 
 const apiBaseUrl = computed(() => {
-  const raw = settingsStore.settings?.basic?.base_url
+  const raw = settingsStore.settings?.base_url
     || import.meta.env.VITE_API_URL
     || window.location.origin
   return raw.replace(/\/$/, '')

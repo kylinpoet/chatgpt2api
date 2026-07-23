@@ -269,7 +269,7 @@ export function requestDisplay(item: SystemLogRow): LogRequestDisplay {
 
 export function executionDisplay(item: SystemLogRow): LogCellDisplay {
   const taskCount = item.imageRequestedCount
-  const attemptCount = item.imageAttempts.length
+  const attemptCount = item.imageAttemptCount
   const caller = item.keyName || item.keyId
   const primary = [
     taskCount > 0 ? `${taskCount} 个任务` : '',
@@ -401,7 +401,7 @@ export function systemLogRowSignature(item: SystemLogRow, input: SystemLogRowSig
     item.imageRequestedCount,
     item.imageSucceededCount,
     item.imageUrls.length,
-    item.imageAttempts.length,
+    item.imageAttemptCount,
     item.accountSwitchCount,
     item.imageUrls.slice(0, 4).map((url) => boundedSignatureText(url, 96)).join(','),
     boundedSignatureText(item.preview),
@@ -452,6 +452,7 @@ export function buildLogPreviewGalleryFile(image: LogPreviewImage | null | undef
     type: 'image',
     expired: false,
     expires_in_seconds: null,
+    expires_at: null,
     tags: [],
     storage: 'log',
     local: false,

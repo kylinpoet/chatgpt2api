@@ -98,8 +98,6 @@ function normalizeGroup(item: ProxyGroup): ProxyGroup {
   return {
     id,
     name: String(item.name || item.id || '').trim(),
-    strategy: item.strategy || 'request_random',
-    rotation_interval_minutes: 0,
     enabled: item.enabled !== false,
     notes: String(item.notes || '').trim(),
     nodes: Array.isArray(item.nodes)
@@ -232,7 +230,6 @@ export function useProxyGroupRuntime() {
       const response = await proxyApi.saveGroup({
         id,
         name: groupName,
-        strategy: 'request_random',
         enabled: groupForm.enabled,
         notes: groupForm.notes.trim(),
         nodes,

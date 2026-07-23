@@ -192,6 +192,7 @@ export type SystemLogRow = {
   urls: string[]
   imageUrls: string[]
   imageAttempts: ImageAttempt[]
+  imageAttemptCount: number
   imageRequestedCount: number
   imageSucceededCount: number
   imageFailedCount: number
@@ -476,6 +477,10 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
   const urls = collectUrls(detail)
   const imageUrls = normalizePreviewUrls(urls, options.apiBaseUrl)
   const imageAttempts = normalizeImageAttempts(detailRawValue(detail, 'image_attempts'))
+  const imageAttemptCount = Math.max(
+    normalizeNonNegativeNumber(detailRawValue(detail, 'image_attempt_count')),
+    imageAttempts.length,
+  )
   const requestMeta = detail.request_meta && typeof detail.request_meta === 'object'
     ? detail.request_meta as Record<string, unknown>
     : {}
@@ -511,7 +516,10 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
           ? 'failed'
           : ''
   )
-  const accountSwitchCount = imageAccountSwitchCount(imageAttempts)
+  const accountSwitchCount = Math.max(
+    normalizeNonNegativeNumber(detailRawValue(detail, 'account_switch_count')),
+    imageAccountSwitchCount(imageAttempts),
+  )
   const status = detailValue(detail, 'status')
   const durationMs = detailValue(detail, 'duration_ms')
   const statusCode = detailValue(detail, 'status_code')
@@ -576,6 +584,7 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
     urls,
     imageUrls,
     imageAttempts,
+    imageAttemptCount,
     imageRequestedCount,
     imageSucceededCount,
     imageFailedCount,
@@ -977,6 +986,9 @@ export const logsApi = {
     })
     return normalizeSystemResponse(response)
   },
+
+  getSystem: (id: string) =>
+    apiClient.get<never, SystemLog>(`/api/logs/${encodeURIComponent(id)}`),
 
   listRuntime: async (params?: RuntimeLogsListParams) => {
     const response = await apiClient.get<never, RuntimeLogsResponseRaw>('/api/runtime-logs', {

@@ -51,55 +51,50 @@ export interface ClearanceTestResult {
 }
 
 export interface Settings {
-  proxy?: string
-  fallback_proxy?: string
+  proxy: string
+  fallback_proxy: string
   proxy_runtime: ProxyRuntimeSettings
-  base_url?: string
-  refresh_account_interval_minute?: number
-  image_retention_days?: number
-  log_retention_days?: number
-  image_poll_timeout_secs?: number
-  image_stream_timeout_secs?: number
-  image_poll_interval_secs?: number
-  image_poll_initial_wait_secs?: number
-  image_account_concurrency?: number
-  image_account_retry_enabled?: boolean
-  image_preflight_token_refresh_enabled?: boolean
-  image_upscale_enabled?: boolean
-  image_upscale_engine?: 'sharp_lanczos3' | 'pillow_lanczos'
-  image_auth_refresh_concurrency?: number
-  image_max_account_attempts?: number
-  image_parallel_generation?: boolean
-  image_remove_conversation_after_result?: boolean
-  image_settle_enabled?: boolean
-  image_check_before_hit_enabled?: boolean
-  image_settle_secs?: number
-  auto_remove_invalid_accounts?: boolean
-  auto_remove_rate_limited_accounts?: boolean
+  base_url: string
+  refresh_account_interval_minute: number
+  image_retention_hours: number
+  log_retention_hours: number
+  image_poll_timeout_secs: number
+  image_stream_timeout_secs: number
+  image_poll_interval_secs: number
+  image_poll_initial_wait_secs: number
+  image_account_concurrency: number
+  image_account_retry_enabled: boolean
+  image_preflight_token_refresh_enabled: boolean
+  image_upscale_enabled: boolean
+  image_upscale_engine: 'sharp_lanczos3' | 'pillow_lanczos'
+  image_auth_refresh_concurrency: number
+  image_max_account_attempts: number
+  image_parallel_generation: boolean
+  image_remove_conversation_after_result: boolean
+  image_settle_enabled: boolean
+  image_check_before_hit_enabled: boolean
+  image_settle_secs: number
+  auto_remove_invalid_accounts: boolean
+  auto_remove_rate_limited_accounts: boolean
   log_levels: string[]
-  global_system_prompt?: string
-  sensitive_words?: string[]
+  global_system_prompt: string
+  sensitive_words: string[]
   ai_review: {
     enabled: boolean
     base_url: string
     api_key: string
     model: string
     prompt: string
-  }
-  basic: {
-    api_key?: string
-    base_url?: string
-    proxy?: string
-    image_expire_hours?: number
+    fail_open: boolean
   }
   image_generation: {
     enabled: boolean
     supported_models: string[]
-    model_options?: string[]
-    block_rich_output_on_base_chat_models?: boolean
-    output_format?: 'base64' | 'url'
-    nanobanana_lane?: 'fast' | 'thinking' | 'pro'
-    nanobanana_lane_order?: Array<'fast' | 'thinking' | 'pro'>
+    model_options: string[]
+    block_rich_output_on_base_chat_models: boolean
+    output_format: 'base64' | 'url'
+    nanobanana_lane: 'fast' | 'thinking' | 'pro'
+    nanobanana_lane_order: Array<'fast' | 'thinking' | 'pro'>
   }
   model_catalog?: {
     models?: Array<{
@@ -136,7 +131,7 @@ export interface Settings {
     image_concurrency_limit: number
     request_queue_timeout_seconds: number
   }
-  image_storage?: {
+  image_storage: {
     enabled: boolean
     mode: 'local' | 'webdav' | 'both'
     webdav_url: string
@@ -145,7 +140,7 @@ export interface Settings {
     webdav_root_path: string
     public_base_url: string
   }
-  backup?: {
+  backup: {
     enabled: boolean
     provider: string
     account_id: string
@@ -159,7 +154,7 @@ export interface Settings {
     passphrase: string
     include: Record<string, boolean>
   }
-  chat_completion_cache?: {
+  chat_completion_cache: {
     enabled: boolean
     ttl_seconds: number
     max_entries: number
@@ -179,7 +174,6 @@ export interface Settings {
     id: string
     name: string
     proxy: string
-    no_proxy?: string
     enabled: boolean
     notes?: string
   }>

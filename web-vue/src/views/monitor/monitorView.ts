@@ -492,10 +492,10 @@ export function buildDiagnosticGroups(
   const switchCount = Number(summary?.account_switches || 0)
   const switchSuccess = Number(summary?.account_switch_success || 0)
   const switchRecoveryRate = Number(summary?.account_switch_recovery_rate || 0)
-  const switchUnrecovered = Math.max(0, switchRequests - switchSuccess)
-  const switchAverage = switchRequests > 0 ? (switchCount / switchRequests).toFixed(1) : '0'
-  const activeEgressCount = Object.keys(summary?.active_by_egress || {}).length
-  const windowModelCount = Object.keys(summary?.by_model || {}).length
+  const switchUnrecovered = Number(summary?.account_switch_unrecovered || 0)
+  const switchAverage = Number(summary?.account_switch_average || 0)
+  const activeEgressCount = Number(summary?.active_egress_count || 0)
+  const windowModelCount = Number(summary?.window_model_count || 0)
 
   return [
     {

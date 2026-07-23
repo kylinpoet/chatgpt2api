@@ -86,6 +86,8 @@ export interface RealtimeMonitorSummary {
   account_switch_requests: number
   account_switches: number
   account_switch_success: number
+  account_switch_unrecovered: number
+  account_switch_average: number
   account_switch_recovery_rate: number
   stream_error_requests: number
   avg_duration_ms: number
@@ -100,9 +102,11 @@ export interface RealtimeMonitorSummary {
     local_reject_or_busy: number
   }
   by_model: Record<string, number>
+  window_model_count: number
   active_by_model: Record<string, number>
-  active_by_egress?: Record<string, number>
-  active_by_stage?: Record<string, number>
+  active_by_egress: Record<string, number>
+  active_egress_count: number
+  active_by_stage: Record<string, number>
 }
 
 export interface RealtimeMonitorEvent {

@@ -1,6 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import type { GalleryFile } from '@/api/gallery'
-import type { SystemLogRow } from '@/api/logs'
+import { logsApi, normalizeSystemLogRow, type SystemLogRow } from '@/api/logs'
 import {
   buildDiagnosticDetailFields,
   buildPrimaryDetailFields,
@@ -56,11 +56,22 @@ export function useLogDetailRuntime() {
     brokenPreviewUrls.value = new Set([...brokenPreviewUrls.value, url])
   }
 
-  function openDetail(item: SystemLogRow) {
+  let detailRequest = 0
+
+  async function openDetail(item: SystemLogRow) {
     selectedLog.value = item
+    const request = ++detailRequest
+    try {
+      const detail = await logsApi.getSystem(item.id)
+      if (request !== detailRequest || selectedLog.value?.id !== item.id) return
+      selectedLog.value = normalizeSystemLogRow(detail, 0)
+    } catch {
+      // Keep the summary row visible when detail loading fails.
+    }
   }
 
   function closeDetail() {
+    detailRequest += 1
     selectedLog.value = null
     selectedDetailPreview.value = null
   }

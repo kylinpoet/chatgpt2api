@@ -30,8 +30,8 @@
             <SettingsBasicConfigPanel
               :settings="localSettings"
               :refresh-account-interval-field="refreshAccountIntervalField"
-              :image-retention-days-field="imageRetentionDaysField"
-              :log-retention-days-field="logRetentionDaysField"
+              :image-retention-hours-field="imageRetentionHoursField"
+              :log-retention-hours-field="logRetentionHoursField"
               :image-poll-timeout-field="imagePollTimeoutField"
               :image-stream-timeout-field="imageStreamTimeoutField"
               :image-account-concurrency-field="imageAccountConcurrencyField"
@@ -244,7 +244,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from 'vue'
 import { Button, FormField, FormSection, HelpTip } from 'nanocat-ui'
-import { normalizeProxyRuntime } from '@/api/settings'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
@@ -418,21 +417,21 @@ const testDefaultProxy = proxyRuntime.testDefaultProxy
 const loadProxyRuntimeStatus = proxyRuntime.loadProxyRuntimeStatus
 const testProxyClearance = proxyRuntime.testProxyClearance
 
-const imageRetentionDaysField = useNumberSettingField(
-  () => localSettings.value?.image_retention_days ?? 15,
+const imageRetentionHoursField = useNumberSettingField(
+  () => localSettings.value?.image_retention_hours ?? 360,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.image_retention_days = value
+    localSettings.value.image_retention_hours = value
   },
-  { integer: true, min: 1, fallback: 15 },
+  { integer: true, min: 1, fallback: 360 },
 )
-const logRetentionDaysField = useNumberSettingField(
-  () => localSettings.value?.log_retention_days ?? 30,
+const logRetentionHoursField = useNumberSettingField(
+  () => localSettings.value?.log_retention_hours ?? 720,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.log_retention_days = value
+    localSettings.value.log_retention_hours = value
   },
-  { integer: true, min: 1, fallback: 30 },
+  { integer: true, min: 1, fallback: 720 },
 )
 const refreshAccountIntervalField = useNumberSettingField(
   () => localSettings.value?.refresh_account_interval_minute ?? 5,
@@ -494,7 +493,6 @@ const clearanceTimeoutField = useNumberSettingField(
   () => localSettings.value?.proxy_runtime?.clearance.timeout_sec ?? 60,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.proxy_runtime = normalizeProxyRuntime(localSettings.value.proxy_runtime)
     localSettings.value.proxy_runtime.clearance.timeout_sec = value
   },
   { integer: true, min: 1, fallback: 60 },
@@ -503,7 +501,6 @@ const clearanceRefreshIntervalField = useNumberSettingField(
   () => localSettings.value?.proxy_runtime?.clearance.refresh_interval ?? 3600,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.proxy_runtime = normalizeProxyRuntime(localSettings.value.proxy_runtime)
     localSettings.value.proxy_runtime.clearance.refresh_interval = value
   },
   { integer: true, min: 60, fallback: 3600 },

@@ -56,27 +56,27 @@
 
       <FormField label="图片自动清理">
         <template #label-extra>
-          <HelpTip text="自动删除多少天前的本地图片。" />
+          <HelpTip text="单位小时。保存后会立即唤醒后台清理任务。" />
         </template>
         <Input
-          :model-value="imageRetentionDaysField.input.value"
+          :model-value="imageRetentionHoursField.input.value"
           type="number"
           block
-          placeholder="15"
-          @update:model-value="imageRetentionDaysField.update"
+          placeholder="360"
+          @update:model-value="imageRetentionHoursField.update"
         />
       </FormField>
 
       <FormField label="日志自动清理">
         <template #label-extra>
-          <HelpTip text="自动删除多少天前的控制台调用日志，清理对象是 data/logs.jsonl。" />
+          <HelpTip text="单位小时。清理后台调用日志数据库中的过期记录。" />
         </template>
         <Input
-          :model-value="logRetentionDaysField.input.value"
+          :model-value="logRetentionHoursField.input.value"
           type="number"
           block
-          placeholder="30"
-          @update:model-value="logRetentionDaysField.update"
+          placeholder="720"
+          @update:model-value="logRetentionHoursField.update"
         />
       </FormField>
 
@@ -132,8 +132,8 @@ import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 defineProps<{
   settings: Settings
   refreshAccountIntervalField: NumberSettingField
-  imageRetentionDaysField: NumberSettingField
-  logRetentionDaysField: NumberSettingField
+  imageRetentionHoursField: NumberSettingField
+  logRetentionHoursField: NumberSettingField
   imagePollTimeoutField: NumberSettingField
   imageStreamTimeoutField: NumberSettingField
   imageAccountConcurrencyField: NumberSettingField

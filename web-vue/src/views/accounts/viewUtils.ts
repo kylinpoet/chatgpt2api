@@ -1,4 +1,4 @@
-import { normalizeAccountSourceType, type Account, type AccountGroup, type AccountLane } from '@/api/accounts'
+import type { Account, AccountGroup, AccountLane } from '@/api/accounts'
 import type { ProxyGroup } from '@/api/proxy'
 import { parseProxyReference, proxyReferenceLabel } from '@/api/proxy'
 import { PILL_TONE_CLASS } from '@/lib/pillTones'
@@ -55,13 +55,6 @@ export type AccountProgressMetricItem = {
 }
 
 const ACCOUNT_STATUS_CATEGORY_VALUES = ['normal', 'limited', 'abnormal', 'disabled'] as const
-const ACCOUNT_STATUS_LABELS: Record<Exclude<AccountStatusFilter, 'all'>, string> = {
-  normal: '正常',
-  limited: '限流',
-  abnormal: '异常',
-  disabled: '禁用',
-}
-
 function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
@@ -362,27 +355,11 @@ export function quotaIssueDetailLines(item: Account): string[] {
 }
 
 export function statusText(item: Account): string {
-  return ACCOUNT_STATUS_LABELS[statusCategory(item)]
-}
-
-const ACCOUNT_PLAN_LABELS: Record<string, string> = {
-  free: 'Free',
-  plus: 'Plus',
-  pro: 'Pro',
-  prolite: 'ProLite',
-  team: 'Team',
-  business: 'Team',
-  enterprise: 'Enterprise',
+  return cleanString(item.status_label) || '未知'
 }
 
 export function statusCategory(item: Account): Exclude<AccountStatusFilter, 'all'> {
-  const category = accountStatusCategoryValue(item)
-  if (category) return category
-  const backendStatus = cleanString(item.backend_status)
-  if (backendStatus === '限流') return 'limited'
-  if (backendStatus === '异常') return 'abnormal'
-  if (backendStatus === '禁用') return 'disabled'
-  return 'normal'
+  return accountStatusCategoryValue(item) || 'abnormal'
 }
 
 export function statusClass(item: Account): string {
@@ -398,18 +375,11 @@ export function statusReason(item: Account): string {
   const explicitReason = String(item.status_reason || '').trim()
   if (explicitReason) return explicitReason
 
-  if (String(item.last_error_kind || '').toLowerCase() === 'auth_invalid') {
-    return '登录态失效'
-  }
-
   const issueLines = quotaIssueDetailLines(item)
   if (issueLines.length > 0) return issueLines.join('；')
 
   const lastError = String(item.last_error || '').trim()
   if (lastError) return lastError
-  if (!item.enabled || item.status === 'disabled') return '账号禁用'
-  if (item.status === 'incomplete') return '配置不完整，请检查 access token、套餐或代理'
-  if (item.status === 'invalid') return '账号鉴权异常'
   return '账号正常可用'
 }
 
@@ -519,10 +489,8 @@ export function accountSecondaryText(item: Account): string {
 }
 
 export function accountSourceText(item: Account): string {
-  const source = normalizeAccountSourceType(item.source_type) === 'codex' ? 'Codex' : 'Web'
-  const rawPlan = cleanString(item.type)
-  const planKey = rawPlan.toLowerCase().replaceAll('-', '').replaceAll('_', '').replaceAll(' ', '')
-  const plan = ACCOUNT_PLAN_LABELS[planKey] || rawPlan || '未知'
+  const source = cleanString(item.source_label) || '未知'
+  const plan = cleanString(item.plan_label) || '未知'
   return `${source} / ${plan}`
 }
 

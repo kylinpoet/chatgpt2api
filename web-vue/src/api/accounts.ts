@@ -5,6 +5,7 @@ export type AccountLane = 'fast' | 'thinking' | 'pro'
 export type AccountSourceType = 'web' | 'codex'
 export type AccountBackendStatus = '正常' | '限流' | '异常' | '禁用'
 export type AccountStatusCategory = 'normal' | 'limited' | 'abnormal' | 'disabled'
+export type AccountAvailability = 'ready' | 'cooling' | 'invalid' | 'disabled'
 
 export interface Account {
   id: string
@@ -16,10 +17,19 @@ export interface Account {
   user_id?: string
   type?: string
   source_type?: AccountSourceType
+  source_label?: string
+  plan_type?: string
+  plan_label?: string
   proxy?: string
   group_id?: string
   quota?: number
   image_quota_unknown?: boolean
+  image_quota?: {
+    known: boolean
+    remaining: number | null
+    limited: boolean
+    restore_at?: string | number | null
+  }
   last_remote_check_result?: '' | 'pending' | 'ok' | 'error' | 'invalid'
   last_remote_check_error?: string
   last_remote_check_attempt_at?: string
@@ -190,7 +200,26 @@ export interface AccountRefreshProgress {
   } | null
 }
 
-type BackendAccount = Record<string, any>
+type BackendAccount = Record<string, unknown> & {
+  access_token?: string
+  accessToken?: string
+  backend_status?: AccountBackendStatus
+  status_category?: AccountStatusCategory
+  status_label?: string
+  availability?: AccountAvailability
+  enabled?: boolean
+  status_reason?: string
+  status_reason_code?: Account['status_reason_code']
+  last_error?: string
+  last_error_kind?: Account['last_error_kind']
+  source_type?: AccountSourceType
+  source_label?: string
+  plan_type?: string
+  plan_label?: string
+  image_quota?: Account['image_quota']
+  success_count?: number
+  failure_count?: number
+}
 
 type BackendAccountsResponse = {
   items?: BackendAccount[]
@@ -231,8 +260,6 @@ export const ACCOUNT_SOURCE_TYPE_VALUES = ['web', 'codex'] as const
 const ACCOUNT_STATUS_CATEGORY_VALUES = ['normal', 'limited', 'abnormal', 'disabled'] as const
 const STATUS_NORMAL: AccountBackendStatus = '正常'
 const STATUS_DISABLED: AccountBackendStatus = '禁用'
-const STATUS_LIMITED: AccountBackendStatus = '限流'
-const STATUS_INVALID: AccountBackendStatus = '异常'
 
 const accountTokenById = new Map<string, string>()
 
@@ -242,7 +269,7 @@ function cleanString(value: unknown): string {
 
 export function normalizeAccountSourceType(value: unknown): AccountSourceType {
   const raw = cleanString(value).toLowerCase()
-  return ['codex', 'cpa', 'cpa_json', 'remote_cpa', 'sub2api'].includes(raw) ? 'codex' : 'web'
+  return raw === 'codex' ? 'codex' : 'web'
 }
 
 export function normalizeAccountBackendStatus(
@@ -290,61 +317,6 @@ function displayIdForAccount(item: BackendAccount, index: number, usedIds: Set<s
   return candidate
 }
 
-function backendStatusToFrontend(item: BackendAccount): Pick<
-  Account,
-  'enabled' | 'status' | 'status_reason' | 'status_reason_code' | 'last_error_kind'
-> {
-  const category = accountStatusCategoryFromBackend(item)
-  const remoteCheckResult = cleanString(item.last_remote_check_result).toLowerCase()
-  const lastRefreshError = cleanString(
-    item.last_remote_check_error
-    || item.last_refresh_error
-    || item.last_token_refresh_error,
-  )
-
-  if (category === 'disabled') {
-    return {
-      enabled: false,
-      status: 'disabled',
-      status_reason: '账号已手动禁用',
-      status_reason_code: 'disabled',
-      last_error_kind: '',
-    }
-  }
-
-  if (category === 'abnormal') {
-    return {
-      enabled: true,
-      status: 'invalid',
-      status_reason: '远程确认账号登录态已失效',
-      status_reason_code: 'account_invalid',
-      last_error_kind: 'auth_invalid',
-    }
-  }
-
-  if (category === 'limited') {
-    return {
-      enabled: true,
-      status: 'cooling',
-      status_reason: '远程确认图片额度已用完',
-      status_reason_code: 'image_quota_exhausted',
-      last_error_kind: 'quota_exhausted',
-    }
-  }
-
-  return {
-    enabled: true,
-    status: 'ready',
-    status_reason: remoteCheckResult === 'pending'
-      ? '正在核验账号状态，完成后会自动恢复或按设置移除。'
-      : remoteCheckResult === 'error' || lastRefreshError
-        ? '最近一次账号检测失败，尚未确认账号失效。'
-        : '',
-    status_reason_code: '',
-    last_error_kind: remoteCheckResult === 'error' || lastRefreshError ? 'upstream_error' : '',
-  }
-}
-
 function normalizeAccountStatusCategory(value: unknown): AccountStatusCategory | undefined {
   const raw = cleanString(value)
   return ACCOUNT_STATUS_CATEGORY_VALUES.includes(raw as AccountStatusCategory)
@@ -352,23 +324,18 @@ function normalizeAccountStatusCategory(value: unknown): AccountStatusCategory |
     : undefined
 }
 
-const BACKEND_STATUS_BY_CATEGORY: Record<AccountStatusCategory, AccountBackendStatus> = {
-  normal: STATUS_NORMAL,
-  limited: STATUS_LIMITED,
-  abnormal: STATUS_INVALID,
-  disabled: STATUS_DISABLED,
+function normalizeAccountAvailability(value: unknown): AccountAvailability {
+  const raw = cleanString(value)
+  return ['ready', 'cooling', 'invalid', 'disabled'].includes(raw)
+    ? raw as AccountAvailability
+    : 'invalid'
 }
 
-const CATEGORY_BY_BACKEND_STATUS: Record<AccountBackendStatus, AccountStatusCategory> = {
-  [STATUS_NORMAL]: 'normal',
-  [STATUS_LIMITED]: 'limited',
-  [STATUS_INVALID]: 'abnormal',
-  [STATUS_DISABLED]: 'disabled',
-}
-
-function accountStatusCategoryFromBackend(item: BackendAccount): AccountStatusCategory {
-  return normalizeAccountStatusCategory(item.status_category)
-    || CATEGORY_BY_BACKEND_STATUS[normalizeAccountBackendStatus(item.status)]
+function accountSourceTypeFromBackend(value: unknown): AccountSourceType | undefined {
+  const raw = cleanString(value).toLowerCase()
+  return ACCOUNT_SOURCE_TYPE_VALUES.includes(raw as AccountSourceType)
+    ? raw as AccountSourceType
+    : undefined
 }
 
 function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<string>): Account {
@@ -376,22 +343,20 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
   const id = displayIdForAccount(item, index, usedIds)
   if (accessToken) accountTokenById.set(id, accessToken)
 
-  const quota = Math.max(0, Number(item.quota ?? 0) || 0)
-  const imageQuotaUnknown = item.image_quota_unknown !== false
-  const statusCategory = accountStatusCategoryFromBackend(item)
-  const backendStatus = BACKEND_STATUS_BY_CATEGORY[statusCategory]
-  const status = backendStatusToFrontend(item)
+  const imageQuota = item.image_quota && typeof item.image_quota === 'object'
+    ? item.image_quota
+    : { known: false, remaining: null, limited: false, restore_at: null }
+  const quota = imageQuota.known ? Math.max(0, Number(imageQuota.remaining ?? 0) || 0) : 0
+  const imageQuotaUnknown = !imageQuota.known
+  const statusCategory = normalizeAccountStatusCategory(item.status_category) || 'abnormal'
+  const backendStatus = normalizeAccountBackendStatus(item.backend_status, '异常')
+  const availability = normalizeAccountAvailability(item.availability)
   const createdAt = toTimestampSeconds(item.created_at)
   const updatedAt = toTimestampSeconds(item.updated_at || item.last_used_at || item.created_at)
-  const restoreAt = toTimestampSeconds(item.restore_at || item.quota_restore_at || item.reset_at)
+  const restoreAt = toTimestampSeconds(imageQuota.restore_at || item.restore_at)
   const lastRemoteCheckResult = cleanString(item.last_remote_check_result).toLowerCase()
-  const lastRefreshError = cleanString(
-    item.last_remote_check_error
-    || item.last_refresh_error
-    || item.last_token_refresh_error,
-  )
-  const type = cleanString(item.type || item.plan_type)
-  const sourceType = normalizeAccountSourceType(item.source_type)
+  const type = cleanString(item.plan_type)
+  const sourceType = accountSourceTypeFromBackend(item.source_type)
   const email = cleanString(item.email)
   const userId = cleanString(item.user_id)
 
@@ -405,10 +370,14 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
     user_id: userId,
     type,
     source_type: sourceType,
+    source_label: cleanString(item.source_label),
+    plan_type: type,
+    plan_label: cleanString(item.plan_label),
     proxy: cleanString(item.proxy),
     group_id: cleanString(item.group_id),
     quota,
     image_quota_unknown: imageQuotaUnknown,
+    image_quota: imageQuota,
     last_remote_check_result: (
       ['pending', 'ok', 'error', 'invalid'].includes(lastRemoteCheckResult)
         ? lastRemoteCheckResult
@@ -421,16 +390,16 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
     cookie: maskToken(accessToken),
     snlm0e: '',
     push_id: '',
-    enabled: status.enabled,
-    status: status.status,
-    status_reason: status.status_reason,
-    status_reason_code: status.status_reason_code,
+    enabled: item.enabled !== false,
+    status: availability,
+    status_reason: cleanString(item.status_reason),
+    status_reason_code: (item.status_reason_code || '') as Account['status_reason_code'],
     lanes: [...DEFAULT_LANES],
     model_ids: { ...EMPTY_MODEL_IDS },
-    failure_count: Number(item.fail ?? 0) || 0,
-    success_count: Number(item.success ?? 0) || 0,
-    last_error: lastRefreshError,
-    last_error_kind: status.last_error_kind,
+    failure_count: Number(item.failure_count ?? 0) || 0,
+    success_count: Number(item.success_count ?? 0) || 0,
+    last_error: cleanString(item.last_error),
+    last_error_kind: (item.last_error_kind || '') as Account['last_error_kind'],
     daily_usage: { fast: 0, thinking: 0, pro: 0, image: 0, music: 0, video: 0 },
     quota_limits: {
       enabled: !imageQuotaUnknown,
@@ -451,7 +420,7 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
         used: 0,
         limit: imageQuotaUnknown ? -1 : quota,
         remaining: imageQuotaUnknown ? -1 : quota,
-        limited: statusCategory === 'limited',
+        limited: imageQuota.limited,
       },
       music: { used: 0, limit: -1, remaining: -1, limited: false },
       video: { used: 0, limit: -1, remaining: -1, limited: false },

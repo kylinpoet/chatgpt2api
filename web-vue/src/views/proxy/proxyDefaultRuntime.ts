@@ -40,7 +40,7 @@ function firstSelectValue(value: string | string[]) {
 }
 
 function defaultProxyFromSettings(settings: Settings) {
-  return String(settings.basic?.proxy || settings.proxy || '').trim()
+  return String(settings.proxy || '').trim()
 }
 
 function fallbackProxyFromSettings(settings: Settings) {

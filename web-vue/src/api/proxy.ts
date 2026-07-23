@@ -12,7 +12,6 @@ export interface ProxyProfile {
   id: string
   name: string
   proxy: string
-  no_proxy?: string
   enabled: boolean
   notes?: string
 }
@@ -39,8 +38,6 @@ export interface ProxyNode {
 export interface ProxyGroup {
   id: string
   name: string
-  strategy: 'request_random' | 'time_window' | 'round_robin'
-  rotation_interval_minutes?: number
   enabled: boolean
   notes?: string
   nodes: ProxyNode[]

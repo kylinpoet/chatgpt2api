@@ -1,6 +1,5 @@
 import { ref, type Ref } from 'vue'
 
-import { normalizeProxyRuntime } from '@/api/settings'
 import {
   parseProxyReference,
   proxyApi,
@@ -120,9 +119,6 @@ export function useSettingsProxyRuntime(options: SettingsProxyRuntimeOptions) {
       {
         apply: (response) => {
           proxyRuntimeStatus.value = response.status
-          if (options.localSettings.value && !options.localSettings.value.proxy_runtime) {
-            options.localSettings.value.proxy_runtime = normalizeProxyRuntime(response.runtime)
-          }
         },
         onError: (message) => {
           proxyRuntimeStatus.value = null

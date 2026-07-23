@@ -72,8 +72,6 @@ export function proxyGroupRowSignature(group: ProxyGroup, testingKey: string, sa
     group.id,
     group.name,
     group.enabled !== false ? 1 : 0,
-    group.strategy,
-    group.rotation_interval_minutes,
     boundedSignatureText(group.notes),
     group.nodes.map(proxyNodeSignature).join(';'),
     testingKeyForGroup(group, testingKey),
